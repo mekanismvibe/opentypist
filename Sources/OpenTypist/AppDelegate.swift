@@ -194,7 +194,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var loadedModelName: String {
         guard let url = loadedModelURL else { return models.activeModelName ?? "model" }
-        return ModelCatalog.all.first { $0.fileName == url.lastPathComponent }?.name ?? url.deletingPathExtension().lastPathComponent
+        let name = url.lastPathComponent
+        return ModelCatalog.all.first { ([$0.fileName] + $0.legacyFileNames).contains(name) }?.name
+            ?? url.deletingPathExtension().lastPathComponent
     }
 
     private func noteTyping() {

@@ -232,6 +232,36 @@ enum PromptBuilder {
         return words
     }
 
+    /// The beginning of `text` up to the end of its first complete word, once
+    /// that word has ended (a later word or punctuation has begun), cleaned
+    /// like a final suggestion. nil while the first word may still grow.
+    static func firstCompleteWord(in text: String, prompt: Prompt) -> String? {
+        let words = splitWords(text)
+        // The first word is complete once a second one has started, or once
+        // the text after it has punctuation or whitespace.
+        guard words.count >= 2 || (words.count == 1 && text.last.map { $0.isWhitespace || $0.isPunctuation } == true) else {
+            return nil
+        }
+        return clean(words[0], prompt: prompt, maxWords: 1, hitTokenLimit: false)
+    }
+
+    /// What to show while a suggestion is still being generated: only the
+    /// words that are complete (a half-generated word may still change),
+    /// cleaned like a final suggestion. Every token generated so far already
+    /// passed the confidence filter.
+    static func streamingText(_ text: String, prompt: Prompt, maxWords: Int, textAfter: String) -> String? {
+        var words = splitWords(text)
+        if let last = text.last, !last.isWhitespace, !last.isPunctuation, !words.isEmpty { words.removeLast() }
+        guard !words.isEmpty, var shown = clean(words.joined(), prompt: prompt, maxWords: maxWords, hitTokenLimit: false) else {
+            return nil
+        }
+        if !textAfter.isEmpty {
+            guard let fitted = fitBefore(textAfter, suggestion: shown) else { return nil }
+            shown = fitted
+        }
+        return shown
+    }
+
     /// Word count of the model output used as an early stop signal.
     static func shouldStop(_ text: String, maxWords: Int) -> Bool {
         if text.contains(where: { $0.isNewline }) { return true }

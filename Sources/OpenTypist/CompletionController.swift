@@ -110,6 +110,8 @@ final class CompletionController {
 
     private func accept(_ chunk: String) {
         guard !chunk.isEmpty, let suggestion, let visible = visibleText else { return }
+        // Accepting what's visible ends a suggestion that's still streaming.
+        engine.cancelAll()
         let consumedBefore = suggestion.text.count - visible.count
         var inserted = chunk
         // Finishing the suggestion: optionally add a space so typing can go on.
@@ -197,17 +199,26 @@ final class CompletionController {
             textAfter: textAfter
         )
         let started = Date()
-        engine.complete(request) { [weak self] text in
+        var firstShownMs: Int?
+        // Show each complete word as soon as it exists, then the final text.
+        let present: (String) -> Void = { [weak self] text in
             guard let self, self.settings.enabled else { return }
-            let ms = Int(Date().timeIntervalSince(started) * 1000)
-            guard let text else {
-                self.status.note("\(ctx.appName): the model had no good suggestion (\(ms) ms)")
-                return
-            }
             self.suggestion = Suggestion(textBefore: before, text: text, pid: ctx.pid)
             self.show(text, context: ctx, caret: caret)
-            self.stats.recordShown()
-            self.status.note("\(ctx.appName): showing a suggestion (\(ms) ms)")
+            if firstShownMs == nil {
+                firstShownMs = Int(Date().timeIntervalSince(started) * 1000)
+                self.stats.recordShown()
+            }
+        }
+        engine.complete(request, onPartial: present) { [weak self] text in
+            guard let self else { return }
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            if let text {
+                present(text)
+                self.status.note("\(ctx.appName): suggestion shown after \(firstShownMs ?? ms) ms, complete after \(ms) ms")
+            } else if firstShownMs == nil {
+                self.status.note("\(ctx.appName): the model had no good suggestion (\(ms) ms)")
+            }
         }
     }
 

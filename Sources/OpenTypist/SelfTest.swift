@@ -134,6 +134,20 @@ enum SelfTest {
         precondition(PromptBuilder.confidentText(finishing, hitTokenLimit: false, minProbability: 0.45, wordMinProbability: 0.15).text == "terested")
         precondition(PromptBuilder.confidentText(finishing, hitTokenLimit: false, minProbability: 0.15, wordMinProbability: 0.1).text == "terested in the")
 
+        // Streaming shows complete words only, cleaned like a final suggestion.
+        let spaced = PromptBuilder.build(textBefore: "so ", appName: nil, windowTitle: nil)
+        precondition(PromptBuilder.streamingText(" I'll be th", prompt: spaced, maxWords: 7, textAfter: "") == "I'll be")
+        precondition(PromptBuilder.streamingText(" I'll", prompt: spaced, maxWords: 7, textAfter: "") == nil)
+        precondition(PromptBuilder.streamingText(" I'll be there.", prompt: spaced, maxWords: 7, textAfter: "") == "I'll be there.")
+        let midWord = PromptBuilder.build(textBefore: "very in", appName: nil, windowTitle: nil)
+        precondition(PromptBuilder.streamingText("terested in th", prompt: midWord, maxWords: 7, textAfter: "") == "terested in")
+        precondition(PromptBuilder.streamingText("terested in this", prompt: midWord, maxWords: 7, textAfter: " this job") == nil
+                     || PromptBuilder.streamingText("terested in this job ", prompt: midWord, maxWords: 7, textAfter: " this job") == "terested in")
+
+        // Gemma 4 E2B moved to Q4_0; the earlier Q4_K_M file still counts.
+        let gemma = ModelCatalog.model(id: "gemma-4-e2b")!
+        precondition(gemma.fileName.contains("Q4_0") && gemma.legacyFileNames.contains("gemma-4-E2B.i1-Q4_K_M.gguf"))
+
         // Mid-line: lead into the text after the caret, don't repeat it.
         precondition(PromptBuilder.fitBefore(" this job.", suggestion: "terested in this job") == "terested in")
         precondition(PromptBuilder.fitBefore(" tomorrow", suggestion: " see you tomorrow") == " see you")
@@ -233,12 +247,15 @@ enum SelfTest {
     /// `OpenTypist --calibrate`: replays real-looking messages word by word
     /// (and mid-word) and measures, for each confidence threshold, how often a
     /// suggestion is shown and how often its first word is what came next.
-    static func calibrate() -> Never {
+    static func calibrate(arguments: [String]) -> Never {
         let engine = LlamaEngine()
-        guard let path = ModelManager.shared.activeModelURL?.path, (try? engine.load(path: path)) != nil else {
+        var path = ModelManager.shared.activeModelURL?.path
+        if let i = arguments.firstIndex(of: "--model"), i + 1 < arguments.count { path = arguments[i + 1] }
+        guard let path, (try? engine.load(path: path)) != nil else {
             print("No model")
             exit(1)
         }
+        print("model: \(URL(fileURLWithPath: path).lastPathComponent) (\(engine.modelDescription))")
         let corpus: [(app: String, text: String)] = [
             ("Mail", "Hi Sarah, thanks for getting back to me so quickly. I'm running a few minutes late, so please start the meeting without me. I will join as soon as I can and catch up on the notes afterwards."),
             ("Mail", "Dear hiring manager, I am writing to express my interest in the software engineer position at your company. I have five years of experience building web applications and I would love the opportunity to talk with you."),
@@ -333,6 +350,47 @@ enum SelfTest {
                              Double(shownWords) / Double(wordCases.count) * 100,
                              shownWords > 0 ? Double(rightWords) / Double(shownWords) * 100 : 0))
             }
+        }
+
+        // Latency as the app runs it: medium length, early stop at each level.
+        // "first word" is when the first complete word exists, which is the
+        // earliest a streaming display could show something.
+        print("\nLatency per keystroke (medium length, app settings)")
+        print("level      tokens/keystroke  total median  total p90  first word median  first word p90")
+        for level in ConfidenceLevel.allCases {
+            var totals: [Double] = [], firsts: [Double] = [], tokenCounts: [Int] = []
+            for (app, text) in corpus {
+                let allWords = text.split(separator: " ").map(String.init)
+                for i in 2..<allWords.count {
+                    var befores = [allWords[..<i].joined(separator: " ") + " "]
+                    if allWords[i].count >= 5 { befores.append(allWords[..<i].joined(separator: " ") + " " + allWords[i].prefix(2)) }
+                    for before in befores {
+                        let prompt = PromptBuilder.build(textBefore: before, appName: app, windowTitle: nil)
+                        let start = Date()
+                        var firstWord: Double?
+                        let output = engine.complete(
+                            prompt: prompt.text, maxTokens: CompletionLength.medium.maxTokens, healLastToken: prompt.healLastToken,
+                            minProbability: level.minProbability, wordMinProbability: level.wordMinProbability,
+                            shouldContinue: { true },
+                            stop: { text in
+                                if firstWord == nil, PromptBuilder.firstCompleteWord(in: text, prompt: prompt) != nil {
+                                    firstWord = Date().timeIntervalSince(start) * 1000
+                                }
+                                return PromptBuilder.shouldStop(text, maxWords: CompletionLength.medium.maxWords)
+                            })
+                        let total = Date().timeIntervalSince(start) * 1000
+                        guard let output else { continue }
+                        totals.append(total)
+                        firsts.append(firstWord ?? total)
+                        tokenCounts.append(output.tokens.count)
+                    }
+                }
+            }
+            totals.sort(); firsts.sort()
+            let meanTokens = Double(tokenCounts.reduce(0, +)) / Double(max(tokenCounts.count, 1))
+            print(String(format: "%-10@ %5.1f             %6.1f ms     %6.1f ms   %6.1f ms          %6.1f ms",
+                         level.rawValue as NSString, meanTokens, totals[totals.count / 2], totals[totals.count * 9 / 10],
+                         firsts[firsts.count / 2], firsts[firsts.count * 9 / 10]))
         }
         engine.unload()
         exit(0)

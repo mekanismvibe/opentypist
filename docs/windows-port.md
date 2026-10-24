@@ -87,6 +87,12 @@ really reaches the prompt.
 - Max tokens / words by length setting: short 10 / 3, medium 20 / 7,
   long 36 / 15. Stop at a newline.
 - Cancel a running generation as soon as a newer keystroke arrives.
+- Stream: show the suggestion once its first word is complete and grow it
+  word by word (`streamingText`); the first word is ready in about half the
+  time of the full suggestion.
+- Gemma 4 E2B is downloaded as Q4_0 (same measured quality as Q4_K_M, a little
+  faster on GPUs); measure Q4_0 vs Q4_K_M on Windows GPUs too, since the best
+  format differs by backend.
 - Free the model before the process exits (ggml's GPU backend can assert
   otherwise).
 
