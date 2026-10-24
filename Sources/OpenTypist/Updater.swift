@@ -152,8 +152,13 @@ final class Updater: ObservableObject {
         }
     }
 
+    /// The latest release, if any (for `--update-test`).
+    func latestRelease() async throws -> Release? {
+        try await fetchLatest()
+    }
+
     /// Downloads, verifies and unpacks the update; returns the new .app.
-    private func prepare(_ release: Release) async throws -> URL {
+    func prepare(_ release: Release) async throws -> URL {
         let work = FileManager.default.temporaryDirectory.appendingPathComponent("OpenTypistUpdate-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
 
@@ -185,7 +190,10 @@ final class Updater: ObservableObject {
     }
 
     private func replaceRunningApp(with newApp: URL) throws {
-        let current = Bundle.main.bundleURL
+        try replace(appAt: Bundle.main.bundleURL, with: newApp)
+    }
+
+    func replace(appAt current: URL, with newApp: URL) throws {
         guard FileManager.default.isWritableFile(atPath: current.deletingLastPathComponent().path) else {
             // No permission to replace it: hand the user the update to drag in.
             NSWorkspace.shared.activateFileViewerSelecting([newApp])

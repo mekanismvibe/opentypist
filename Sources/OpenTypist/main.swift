@@ -10,6 +10,9 @@ if arguments.contains("--selftest") {
 if arguments.contains("--snapshot-personal") {
     SelfTest.snapshotPersonal(arguments: arguments)
 }
+if arguments.contains("--update-test") {
+    SelfTest.updateTest(arguments: arguments)
+}
 if arguments.contains("--calibrate") {
     SelfTest.calibrate()
 }

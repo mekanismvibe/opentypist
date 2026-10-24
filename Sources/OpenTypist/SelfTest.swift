@@ -243,6 +243,47 @@ enum SelfTest {
         exit(0)
     }
 
+    /// `OpenTypist --update-test <folder>`: runs the real updater against the
+    /// latest GitHub release, but swaps a throwaway copy of this app inside
+    /// <folder> instead of the installed one.
+    static func updateTest(arguments: [String]) -> Never {
+        guard let index = arguments.firstIndex(of: "--update-test"), index + 1 < arguments.count,
+              Bundle.main.bundleURL.pathExtension == "app" else {
+            print("Usage: /path/to/OpenTypist.app/Contents/MacOS/OpenTypist --update-test <folder>")
+            exit(1)
+        }
+        let folder = URL(fileURLWithPath: arguments[index + 1])
+        let target = folder.appendingPathComponent("OpenTypist.app")
+        let done = DispatchSemaphore(value: 0)
+        var failed = false
+        Task {
+            do {
+                try? FileManager.default.removeItem(at: target)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try FileManager.default.copyItem(at: Bundle.main.bundleURL, to: target)
+                let before = Bundle(url: target)?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+                guard let release = try await Updater.shared.latestRelease() else {
+                    print("No published release with a DMG and checksum")
+                    failed = true
+                    done.signal()
+                    return
+                }
+                print("Latest release: \(release.version) (\(release.page.absoluteString)); this copy: \(before)")
+                let staged = try await Updater.shared.prepare(release)
+                print("Downloaded, checksum verified, app verified: \(staged.path)")
+                try Updater.shared.replace(appAt: target, with: staged)
+                let after = Bundle(url: target)?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+                print("Replaced \(target.path): \(before) → \(after)")
+            } catch {
+                print("Update test failed: \(error.localizedDescription)")
+                failed = true
+            }
+            done.signal()
+        }
+        while done.wait(timeout: .now()) == .timedOut { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        exit(failed ? 1 : 0)
+    }
+
     /// `OpenTypist --complete a.txt b.txt …`: greedy continuation of each raw
     /// prompt file, for tuning prompt formats.
     static func completeFiles(arguments: [String]) -> Never {
