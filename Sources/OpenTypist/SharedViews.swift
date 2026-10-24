@@ -23,11 +23,24 @@ final class ViewState: ObservableObject {
         didSet { UserDefaults.standard.set(onboardingStep, forKey: "onboardingStep") }
     }
 
+    /// Profile text being edited, and the saved text it started from.
+    @Published var profileDraft = Personalization.shared.profile.text
+    @Published var profileDraftBase = Personalization.shared.profile.text
+    @Published var newNeverCorrectWord = ""
+    @Published var showingSamples = false
+
     private var timer: AnyCancellable?
+    private var profileWatch: AnyCancellable?
 
     private init() {
         timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             self?.refreshPermissions()
+        }
+        // Follow outside changes (learned updates, restores) unless mid-edit.
+        profileWatch = Personalization.shared.$profile.sink { [weak self] profile in
+            guard let self, self.profileDraft == self.profileDraftBase else { return }
+            self.profileDraft = profile.text
+            self.profileDraftBase = profile.text
         }
     }
 

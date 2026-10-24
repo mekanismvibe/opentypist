@@ -15,6 +15,8 @@ final class EngineService {
         var appName: String?
         var windowTitle: String?
         var screenText: String?
+        var profile: String?
+        var examples: [String] = []
         var length: CompletionLength
     }
 
@@ -83,7 +85,9 @@ final class EngineService {
                 textBefore: request.textBefore,
                 appName: request.appName,
                 windowTitle: request.windowTitle,
-                screenText: request.screenText
+                screenText: request.screenText,
+                profile: request.profile,
+                examples: request.examples
             )
             let maxWords = request.length.maxWords
             guard let output = engine.complete(
@@ -106,6 +110,8 @@ final class EngineService {
         var appName: String?
         var windowTitle: String?
         var screenText: String?
+        var profile: String?
+        var examples: [String] = []
         var candidates: [String]
     }
 
@@ -119,7 +125,9 @@ final class EngineService {
                     context: request.context,
                     appName: request.appName,
                     windowTitle: request.windowTitle,
-                    screenText: request.screenText
+                    screenText: request.screenText,
+                    profile: request.profile,
+                    examples: request.examples
                 )
                 result = engine.score(prompt: prompt.text, continuations: request.candidates.map { prompt.wordPrefix + $0 })
             }

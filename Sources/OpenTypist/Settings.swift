@@ -64,6 +64,12 @@ final class Settings: ObservableObject {
     /// Add a space after an accepted word or a finished suggestion.
     @Published var acceptTrailingSpace: Bool { didSet { defaults.set(acceptTrailingSpace, forKey: "acceptTrailingSpace") } }
     @Published var showMenuBarIcon: Bool { didSet { defaults.set(showMenuBarIcon, forKey: "showMenuBarIcon") } }
+    /// Put the profile at the top of every prompt.
+    @Published var useProfile: Bool { didSet { defaults.set(useProfile, forKey: "useProfile") } }
+    /// Learn names, words, spelling and greetings from what the user types.
+    @Published var learnHabits: Bool { didSet { defaults.set(learnHabits, forKey: "learnHabits") } }
+    /// Keep encrypted samples of the user's writing as style examples (opt-in).
+    @Published var keepWritingSamples: Bool { didSet { defaults.set(keepWritingSamples, forKey: "keepWritingSamples") } }
     @Published var disabledApps: [String] { didSet { defaults.set(disabledApps, forKey: "disabledApps") } }
     /// A user-chosen .gguf; nil means the downloaded default model.
     @Published var customModelPath: String? { didSet { defaults.set(customModelPath, forKey: "customModelPath") } }
@@ -79,9 +85,15 @@ final class Settings: ObservableObject {
             "autocorrectEnabled": true,
             "aiTypoFix": true,
             "showMenuBarIcon": true,
+            "useProfile": true,
+            "learnHabits": true,
+            "keepWritingSamples": false,
             "disabledApps": Self.defaultDisabledApps,
         ])
         showMenuBarIcon = defaults.bool(forKey: "showMenuBarIcon")
+        useProfile = defaults.bool(forKey: "useProfile")
+        learnHabits = defaults.bool(forKey: "learnHabits")
+        keepWritingSamples = defaults.bool(forKey: "keepWritingSamples")
         autocorrectEnabled = defaults.bool(forKey: "autocorrectEnabled")
         aiTypoFix = defaults.bool(forKey: "aiTypoFix")
         enabled = defaults.bool(forKey: "enabled")

@@ -67,6 +67,42 @@ understands `::typo::fix` hotstrings, the `*` (instant), `?` (inside words),
 `does not`) and exception entries (`::design::` protecting it from
 `:?:ign::ing`).
 
+## Personalization
+
+Settings → Personal (or `opentypist://settings/personal`):
+
+- **Your profile.** A short note that goes at the top of every prompt, like a
+  system prompt. Base models follow *facts* better than instructions, so write
+  it in the first person ("I'm Alex, a nurse in Toronto. I sign emails
+  'Cheers, Alex'.") rather than as commands. With that profile, the model
+  signs an email "Alex" instead of "John". The profile is the first thing in
+  the prompt and rarely changes, so the model caches it and it costs no
+  speed.
+- **It learns, if you let it.** From the keys you type (never from text on
+  screen), OpenTypist notices names you mention, words the dictionary doesn't
+  know, US vs British spelling, your usual greeting and sign-off, and which
+  apps you write casually in. It adds these as plain lines at the end of the
+  profile ("People and things I often mention: Sarah, Proxmox."), at most
+  every ten minutes, or when you click **Update Now**.
+- **You stay in charge.** Edit or delete one of OpenTypist's lines and that
+  topic becomes yours: it won't touch it again. **Lock** the profile to stop
+  all automatic changes, or choose **Ask me first** to review each update
+  before it's applied. Every change goes into a **history** you can restore
+  from.
+- **Never correct.** Undoing a fix with Delete permanently stops autocorrect
+  from touching that word. Words you type often that the dictionary doesn't
+  know are left alone too, and you can add or remove words by hand.
+- **Writing samples (opt-in, off by default).** When you leave a text field
+  or send a message, OpenTypist keeps what you wrote (up to 600 characters)
+  and shows the model a few recent samples from the same app, preferring the
+  same conversation, so suggestions sound like you. Apps you turned off,
+  password fields, card-like numbers and long codes are never kept. You can
+  review and delete samples one by one.
+
+Everything personal (profile, learned counts, samples) is stored only on this
+Mac, AES-GCM encrypted, with the key in your login Keychain. Nothing is ever
+sent anywhere.
+
 ## Permissions
 
 - **Accessibility** (required): reads the focused text field and caret, and
@@ -147,7 +183,14 @@ swift build -c release
 ```
 
 This prints suggestions for sample text and per-keystroke latency.
-`OPENTYPIST_DEBUG=1` turns on llama.cpp logging.
+`OPENTYPIST_DEBUG=1` turns on llama.cpp logging. Other developer tools:
+
+- `OpenTypist --complete a.txt b.txt` prints the model's greedy continuation of
+  each raw prompt file (for tuning prompt formats).
+- `OPENTYPIST_TEST_STORE=1 OpenTypist --snapshot-personal out.png` renders
+  Settings → Personal with sample data into an image. `OPENTYPIST_TEST_STORE`
+  points personal storage at a throwaway folder with an in-memory key, so the
+  real Keychain and data are never touched.
 
 ## How it works
 

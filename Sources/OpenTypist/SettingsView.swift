@@ -9,6 +9,7 @@ struct SettingsView: View {
     var body: some View {
         TabView(selection: $state.settingsTab) {
             GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }.tag("general")
+            PersonalSettings().tabItem { Label("Personal", systemImage: "person.crop.circle") }.tag("personal")
             AppsSettings().tabItem { Label("Apps", systemImage: "square.grid.2x2") }.tag("apps")
             ModelSettings().tabItem { Label("Model", systemImage: "cpu") }.tag("model")
             StatsSettings().tabItem { Label("Stats", systemImage: "chart.bar") }.tag("stats")

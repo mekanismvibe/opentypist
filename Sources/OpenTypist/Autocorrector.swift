@@ -27,8 +27,9 @@ final class Autocorrector {
 
     /// The last fix, while Delete can still undo it.
     private var lastFix: (original: String, replacement: String, ending: String)?
-    /// Words the user undid a fix for.
-    private var ignoredWords = Set<String>()
+    /// Learns from finished words; also holds the never-correct list.
+    private let personal = Personalization.shared
+    private var currentApp: (bundleID: String?, name: String) = (nil, "")
 
     /// A language-model check in flight for the word before `ending`.
     private struct PendingCheck {
@@ -116,12 +117,14 @@ final class Autocorrector {
     }
 
     /// Returns true to swallow the key (we replaced the text ourselves).
-    func handleKeyDown(_ event: CGEvent, bundleID: String?) -> Bool {
-        guard settings.enabled, settings.autocorrectEnabled || settings.aiTypoFix,
-              !settings.isDisabled(bundleID: bundleID) else {
+    /// Runs even with autocorrect off, so typing habits are still learned.
+    func handleKeyDown(_ event: CGEvent, app: NSRunningApplication?) -> Bool {
+        let bundleID = app?.bundleIdentifier
+        guard settings.enabled, !settings.isDisabled(bundleID: bundleID) else {
             reset()
             return false
         }
+        currentApp = (bundleID, app?.localizedName ?? bundleID ?? "")
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
         if flags.contains(.maskCommand) || flags.contains(.maskControl) {
@@ -161,14 +164,16 @@ final class Autocorrector {
         pending?.typedSince.append(c)
 
         if AutocorrectRules.isEndCharacter(c) {
+            let startsSentence = Self.startsSentence(typed.dropLast(AutocorrectRules.lastWord(of: typed).count))
             let swallowed = wordEnded(with: c, event: event)
             if !swallowed { append(String(c)) }
+            learnFromEnding(c, startsSentence: startsSentence)
             return swallowed
         }
 
         append(String(c))
         if settings.autocorrectEnabled, case .fix(let replacement, let length) = rules.matchImmediate(typed),
-           !ignoredWords.contains(String(typed.suffix(length)).lowercased()) {
+           !personal.isNeverCorrect(AutocorrectRules.lastWord(of: typed)) {
             // The app hasn't received `c` yet: delete the rest of the trigger.
             TextInserter.deleteBackward(length - 1)
             TextInserter.type(replacement)
@@ -179,10 +184,23 @@ final class Autocorrector {
         return false
     }
 
+    /// Feeds the word (as it ended up, after any instant fix) and, at the end
+    /// of a line, the line to the learner. Only typed keys are ever used.
+    private func learnFromEnding(_ ending: Character, startsSentence: Bool) {
+        let before = String(typed.dropLast())
+        let word = AutocorrectRules.lastWord(of: before)
+        if !word.isEmpty {
+            personal.observeWord(word, startsSentence: startsSentence, bundleID: currentApp.bundleID, appName: currentApp.name)
+        }
+        if ending == "\n", let line = before.split(separator: "\n", omittingEmptySubsequences: false).last {
+            personal.observeLine(String(line))
+        }
+    }
+
     /// Returns true if the ending key was swallowed and replayed after a fix.
     private func wordEnded(with ending: Character, event: CGEvent) -> Bool {
         let word = AutocorrectRules.lastWord(of: typed)
-        guard !word.isEmpty, !ignoredWords.contains(word.lowercased()) else { return false }
+        guard !word.isEmpty, !personal.isNeverCorrect(word) else { return false }
 
         let match = settings.autocorrectEnabled ? rules.matchAtEnd(of: typed) : nil
         switch match {
@@ -221,16 +239,16 @@ final class Autocorrector {
         TextInserter.type(fix.original)
         replaceTypedSuffix(fix.replacement.count + fix.ending.count, with: fix.original)
         if let word = fix.original.split(whereSeparator: { AutocorrectRules.isEndCharacter($0) }).last {
-            ignoredWords.insert(word.lowercased())
+            personal.addNeverCorrect(String(word))
         }
-        status.note("Undid a correction")
+        status.note("Undid a correction; that word won't be corrected again")
         onTextChanged?()
     }
 
     // MARK: - Language-model check
 
     private func startModelCheck(word: String, candidates: [String]?, margin: Double, ending: Character) {
-        guard settings.aiTypoFix, engine.isReady, word.count >= 3,
+        guard settings.aiTypoFix, engine.isReady, word.count >= 3, !personal.isNeverCorrect(word),
               word.allSatisfy({ $0.isLetter || $0 == "'" }) else { return }
         // Leave alone ALL-CAPS words and, for dictionary checks, names.
         let letters = word.filter(\.isLetter)
@@ -264,6 +282,8 @@ final class Autocorrector {
             appName: settings.useAppContext ? ctx.appName : nil,
             windowTitle: settings.useAppContext ? ctx.windowTitle : nil,
             screenText: ScreenContext.shared.text(for: ctx),
+            profile: Personalization.shared.promptProfile,
+            examples: WritingSamples.shared.examples(bundleID: ctx.bundleID, windowTitle: ctx.windowTitle),
             candidates: [check.word] + options
         )
         // List entries that are real words are known mistakes; for everything
@@ -300,6 +320,8 @@ final class Autocorrector {
         TextInserter.type(replacement + tail)
         replaceTypedSuffix(check.word.count + tail.count, with: replacement + tail)
         if check.typedSince.isEmpty { lastFix = (check.word, replacement, check.ending) }
+        // It was a typo, not one of the user's own words.
+        personal.forgetObservation(of: check.word)
         recordFix(byModel: true)
     }
 

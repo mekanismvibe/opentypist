@@ -149,6 +149,7 @@ final class CompletionController {
         case .failure(let failure): return skip(failure.description)
         }
         if settings.isDisabled(bundleID: ctx.bundleID) { return skip("\(ctx.appName): turned off for this app") }
+        WritingSamples.shared.observe(ctx)
         guard let caret = ctx.caretRect else { return skip("\(ctx.appName): the app doesn't report where the caret is") }
 
         let before = ctx.textBefore
@@ -183,6 +184,8 @@ final class CompletionController {
             appName: settings.useAppContext ? ctx.appName : nil,
             windowTitle: settings.useAppContext ? ctx.windowTitle : nil,
             screenText: ScreenContext.shared.text(for: ctx),
+            profile: Personalization.shared.promptProfile,
+            examples: WritingSamples.shared.examples(bundleID: ctx.bundleID, windowTitle: ctx.windowTitle),
             length: settings.length
         )
         let started = Date()

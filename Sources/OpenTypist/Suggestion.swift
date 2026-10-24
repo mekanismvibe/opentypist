@@ -66,7 +66,8 @@ enum PromptBuilder {
 
     static let maxContextCharacters = 1200
 
-    static func build(textBefore: String, appName: String?, windowTitle: String?, screenText: String? = nil) -> Prompt {
+    static func build(textBefore: String, appName: String?, windowTitle: String?, screenText: String? = nil,
+                      profile: String? = nil, examples: [String] = []) -> Prompt {
         var body = String(textBefore.suffix(maxContextCharacters))
         // Don't start the prompt in the middle of a word.
         if body.count < textBefore.count, let space = body.firstIndex(where: { $0.isWhitespace }) {
@@ -80,15 +81,26 @@ enum PromptBuilder {
         }
         let heal = !stripped && (body.last?.isLetter ?? false)
 
-        let header = header(appName: appName, windowTitle: windowTitle, screenText: screenText)
+        let header = header(appName: appName, windowTitle: windowTitle, screenText: screenText, profile: profile, examples: examples)
         return Prompt(text: header + body, strippedTrailingSpace: stripped, healLastToken: heal)
     }
 
-    /// Context goes first so it stays a stable, cached prefix while the user types.
-    static func header(appName: String?, windowTitle: String?, screenText: String?) -> String {
+    /// Context goes first so it stays a stable, cached prefix while the user
+    /// types, ordered from least to most often changing: the profile, then
+    /// writing examples for this app, then the app, window and screen.
+    static func header(appName: String?, windowTitle: String?, screenText: String?,
+                       profile: String? = nil, examples: [String] = []) -> String {
         var header = ""
+        if let profile, !profile.isEmpty {
+            header += "About me:\n\(profile)\n\n"
+        }
+        if !examples.isEmpty {
+            let place = appName.map { " in \($0)" } ?? ""
+            header += "Examples of things I've written\(place):\n"
+            header += examples.map { "\"\($0)\"" }.joined(separator: "\n") + "\n\n"
+        }
         if let appName, !appName.isEmpty {
-            header = "Application: \(appName)\n"
+            header += "Application: \(appName)\n"
             if let windowTitle, !windowTitle.isEmpty, windowTitle != appName {
                 header += "Window: \(String(windowTitle.prefix(120)))\n"
             }
@@ -103,7 +115,8 @@ enum PromptBuilder {
     /// Prompt for scoring candidate words that come right after `context`.
     /// Returns the prompt and the prefix to put before each candidate: the
     /// space before a word belongs to the word's token, so it moves over.
-    static func scoringPrompt(context: String, appName: String?, windowTitle: String?, screenText: String?) -> (text: String, wordPrefix: String) {
+    static func scoringPrompt(context: String, appName: String?, windowTitle: String?, screenText: String?,
+                              profile: String? = nil, examples: [String] = []) -> (text: String, wordPrefix: String) {
         var body = String(context.suffix(maxContextCharacters))
         if body.count < context.count, let space = body.firstIndex(where: { $0.isWhitespace }) {
             body = String(body[body.index(after: space)...])
@@ -113,7 +126,7 @@ enum PromptBuilder {
             body.removeLast()
             prefix = " "
         }
-        return (header(appName: appName, windowTitle: windowTitle, screenText: screenText) + body, prefix)
+        return (header(appName: appName, windowTitle: windowTitle, screenText: screenText, profile: profile, examples: examples) + body, prefix)
     }
 
     /// Turns raw model output into the suggestion to display, or nil if it is

@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.controller.dismiss()
             self.autocorrector.reset()
+            WritingSamples.shared.flush()
             if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication, app != .current {
                 self.lastExternalApp = app
             }
@@ -77,11 +78,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// wins over normal typing.
     private func handleKeyDown(_ event: CGEvent) -> Bool {
         if controller.handleSuggestionKey(event) { return true }
-        if autocorrector.handleKeyDown(event, bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+        if autocorrector.handleKeyDown(event, app: NSWorkspace.shared.frontmostApplication) {
             return true
         }
         controller.handleKeyDown(event)
         return false
+    }
+
+    /// `opentypist://settings/<tab>` (general, personal, apps, model, stats)
+    /// and `opentypist://setup` open those windows.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "opentypist" {
+            if url.host == "setup" {
+                showOnboarding()
+            } else if url.host == "settings" {
+                let tab = url.pathComponents.dropFirst().first ?? "general"
+                if ["general", "personal", "apps", "model", "stats"].contains(tab) { ViewState.shared.settingsTab = tab }
+                showSettings()
+            }
+        }
     }
 
     /// Opening the app again (Finder, Spotlight) shows Settings: the only
@@ -92,6 +107,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        WritingSamples.shared.flush()
+        Personalization.shared.saveLearned()
         engine.shutdown()
     }
 
@@ -185,6 +202,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if models.isDownloading {
             menu.addItem(item("Cancel Model Download", #selector(cancelDownload)))
         }
+        if Personalization.shared.profile.proposal != nil {
+            menu.addItem(item("Profile Update Ready…", #selector(showPersonalSettings)))
+        }
         menu.addItem(item("Choose Model…", #selector(showModelSettings)))
         menu.addItem(item("Setup Guide…", #selector(showOnboarding)))
         let settingsItem = item("Settings…", #selector(showSettings))
@@ -243,6 +263,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func cancelDownload() { models.cancelDownload() }
 
     @objc private func openAccessibilitySettings() { AppActions.openAccessibilitySettings() }
+
+    @objc private func showPersonalSettings() {
+        ViewState.shared.settingsTab = "personal"
+        showSettings()
+    }
 
     @objc private func showModelSettings() {
         ViewState.shared.settingsTab = "model"
