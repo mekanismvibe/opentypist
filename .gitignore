@@ -1,5 +1,6 @@
 .build/
 build/
+notes.md
 *.gguf
 *.gguf.partial
 .DS_Store

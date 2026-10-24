@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Pinned llama.cpp revision
+        id: llama
+        run: echo "rev=$(git rev-parse HEAD:vendor/llama.cpp)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: build/llama-install
+          key: llama-${{ runner.os }}-${{ runner.arch }}-${{ steps.llama.outputs.rev }}-${{ hashFiles('scripts/build-llama.sh') }}
+
+      - name: Build tools
+        run: |
+          command -v cmake || brew install cmake
+          command -v ninja || brew install ninja
+
+      - name: Build app
+        run: ./scripts/build-app.sh
+
+      - name: Self-test (no model)
+        run: .build/release/OpenTypist --selftest-offline

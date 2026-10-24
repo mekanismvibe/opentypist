@@ -29,6 +29,11 @@ private struct GeneralSettings: View {
                 Picker("Suggestion length", selection: $settings.length) {
                     ForEach(CompletionLength.allCases) { Text($0.title).tag($0) }
                 }
+                Picker("Suggestions", selection: $settings.confidence) {
+                    ForEach(ConfidenceLevel.allCases) { Text($0.title).tag($0) }
+                }
+                Text("Suggestions stop where the model starts guessing. \"Fewer, more accurate\" shows about half as often but is right much more of the time.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Toggle("Use app name and window title as context", isOn: $settings.useAppContext)
                 Toggle("Use text visible on screen as context", isOn: $settings.useScreenContext)
                 Toggle("Add a space after accepting a suggestion", isOn: $settings.acceptTrailingSpace)
@@ -54,12 +59,55 @@ private struct GeneralSettings: View {
             Section("Permissions") {
                 PermissionsPanel()
             }
+            Section("Updates") {
+                UpdatesPanel()
+            }
             Section("Diagnostics") {
                 LabeledContent("Last check") { Text(status.lastCheck).multilineTextAlignment(.trailing) }
                 LabeledContent("Keyboard monitor", value: status.keyboardTapRunning ? "Running" : "Not running")
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct UpdatesPanel: View {
+    @ObservedObject private var updater = Updater.shared
+    @ObservedObject private var settings = Settings.shared
+
+    var body: some View {
+        LabeledContent("Version", value: updater.currentVersion)
+        Toggle("Check for updates automatically", isOn: $settings.checkForUpdates)
+        HStack {
+            Text(statusText).font(.callout).foregroundStyle(statusIsError ? .red : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            if let release = updater.availableRelease {
+                Button("Release Notes") { NSWorkspace.shared.open(release.page) }
+                Button("Install and Relaunch") { updater.install() }.keyboardShortcut(.defaultAction)
+            } else {
+                Button("Check Now") { updater.check() }.disabled(updater.state == .checking)
+            }
+        }
+        Text("Updates come from the project's GitHub releases; checking sends nothing about you.")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+
+    private var statusIsError: Bool {
+        if case .failed = updater.state { return true }
+        return false
+    }
+
+    private var statusText: String {
+        switch updater.state {
+        case .idle:
+            return updater.lastCheck.map { "Last checked \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Not checked yet"
+        case .checking: return "Checking…"
+        case .upToDate: return "OpenTypist is up to date."
+        case .available(let release): return "OpenTypist \(release.version) is available."
+        case .installing(let step): return step
+        case .failed(let message): return message
+        }
     }
 }
 

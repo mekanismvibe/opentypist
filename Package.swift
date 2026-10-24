@@ -1,11 +1,10 @@
 // swift-tools-version:5.9
-import Foundation
 import PackageDescription
 
-// llama.cpp and ggml come from Homebrew (`brew install llama.cpp`).
-// scripts/build-app.sh copies the dylibs into the .app so the built app
-// does not need Homebrew at runtime.
-let brew = ProcessInfo.processInfo.environment["HOMEBREW_PREFIX"] ?? "/opt/homebrew"
+// llama.cpp is vendored as a git submodule (vendor/llama.cpp) and built into
+// static libraries by scripts/build-llama.sh before `swift build`; the app
+// has no runtime dependencies beyond macOS 14.
+let llama = Context.packageDirectory + "/build/llama-install"
 
 let package = Package(
     name: "OpenTypist",
@@ -17,17 +16,18 @@ let package = Package(
             dependencies: ["CLlama"],
             path: "Sources/OpenTypist",
             swiftSettings: [
-                .unsafeFlags([
-                    "-Xcc", "-I\(brew)/opt/llama.cpp/include",
-                    "-Xcc", "-I\(brew)/opt/ggml/include",
-                ]),
+                .unsafeFlags(["-Xcc", "-I\(llama)/include"]),
             ],
             linkerSettings: [
                 .unsafeFlags([
-                    "-L\(brew)/opt/llama.cpp/lib",
-                    "-L\(brew)/opt/ggml/lib",
-                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+                    "-L\(llama)/lib",
+                    "-lggml-cpu", "-lggml-metal", "-lggml-blas",
                 ]),
+                .linkedLibrary("c++"),
+                .linkedFramework("Accelerate"),
+                .linkedFramework("Foundation"),
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
             ]
         ),
     ]

@@ -154,6 +154,26 @@ enum PromptBuilder {
         return text
     }
 
+    /// The part of the generated text the model was confident about: tokens
+    /// up to the first one below `minProbability`. If that token would have
+    /// continued the current word, the half-finished word goes too.
+    static func confidentText(_ tokens: [LlamaEngine.GeneratedToken], hitTokenLimit: Bool, minProbability: Float) -> (text: String, hitTokenLimit: Bool) {
+        guard let cut = tokens.firstIndex(where: { $0.probability < minProbability }) else {
+            return (String(decoding: tokens.flatMap(\.bytes), as: UTF8.self), hitTokenLimit)
+        }
+        var text = String(decoding: tokens[..<cut].flatMap(\.bytes), as: UTF8.self)
+        let next = tokens[cut].bytes.first
+        let startsNewWord = next.map { $0 == 0x20 || $0 == 0x0A || $0 == 0x09 || (0x21...0x2F).contains($0) || (0x3A...0x40).contains($0) } ?? true
+        if !startsNewWord {
+            if let space = text.lastIndex(where: { $0.isWhitespace }), text[..<space].contains(where: { !$0.isWhitespace }) {
+                text = String(text[..<space])
+            } else {
+                text = ""
+            }
+        }
+        return (text, false)
+    }
+
     /// Splits into words, each keeping its leading whitespace.
     static func splitWords(_ text: String) -> [String] {
         var words: [String] = []

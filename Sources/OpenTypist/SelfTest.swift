@@ -88,12 +88,39 @@ enum SelfTest {
 
         autocorrectChecks(engine: engine, arguments: arguments)
         personalizationChecks(engine: engine)
+        offlineChecks()
+        // ggml's Metal backend asserts if the process exits with a model loaded.
+        engine.unload()
+        exit(0)
+    }
 
+    /// `OpenTypist --selftest-offline`: the checks that need no model (CI).
+    static func runOffline(arguments: [String]) -> Never {
+        autocorrectChecks(engine: nil, arguments: arguments)
+        personalizationChecks(engine: nil)
+        offlineChecks()
+        exit(0)
+    }
+
+    private static func offlineChecks() {
         let font = NSFont.systemFont(ofSize: 13)
         let wrapped = OverlayWindow.wrap("I'll be there in about 10 minutes.", font: font, firstWidth: 70, otherWidth: 120)
         print("\nWrap (70pt, then 120pt lines): \(wrapped)")
         precondition(wrapped.count > 1 && wrapped.dropFirst().allSatisfy { $0.first?.isWhitespace != true })
         print("Wrap with no room after the caret: \(OverlayWindow.wrap(" be there soon", font: font, firstWidth: 5, otherWidth: 300))")
+
+        // Confidence cut-off: stop at the first unsure token, and drop a
+        // half-finished word when the unsure token would have continued it.
+        func token(_ text: String, _ p: Float) -> LlamaEngine.GeneratedToken { .init(bytes: Array(text.utf8), probability: p) }
+        let tokens = [token(" I", 0.9), token("'ll", 0.8), token(" be", 0.7), token(" th", 0.6), token("ere", 0.1)]
+        precondition(PromptBuilder.confidentText(tokens, hitTokenLimit: true, minProbability: 0.05).text == " I'll be there")
+        precondition(PromptBuilder.confidentText(tokens, hitTokenLimit: true, minProbability: 0.25).text == " I'll be")
+        precondition(PromptBuilder.confidentText(tokens + [token(" soon", 0.05)], hitTokenLimit: false, minProbability: 0.08).text == " I'll be there")
+        precondition(PromptBuilder.confidentText([token("ing", 0.9), token(" late", 0.1)], hitTokenLimit: false, minProbability: 0.25).text == "ing")
+        precondition(PromptBuilder.confidentText([token(" maybe", 0.1)], hitTokenLimit: false, minProbability: 0.25).text.isEmpty)
+
+        precondition(Updater.isNewer("0.10.0", than: "0.9.2") && Updater.isNewer("0.2.0", than: "0.1.0"))
+        precondition(!Updater.isNewer("0.2.0", than: "0.2.0") && !Updater.isNewer("0.1.9", than: "0.2"))
 
         // Suggestion bookkeeping.
         let s = Suggestion(textBefore: "so ", text: "I'll be there soon", pid: 1)
@@ -102,9 +129,6 @@ enum SelfTest {
         precondition(s.remaining(textBefore: "late, so I'll b") == "e there soon")
         precondition(s.remaining(textBefore: "late, so I'd") == nil)
         print("\nSuggestion checks passed")
-        // ggml's Metal backend asserts if the process exits with a model loaded.
-        engine.unload()
-        exit(0)
     }
 
     /// `OPENTYPIST_TEST_STORE=1 OpenTypist --snapshot-personal out.png`:
@@ -147,6 +171,78 @@ enum SelfTest {
         exit(0)
     }
 
+    /// `OpenTypist --calibrate`: replays real-looking messages word by word
+    /// (and mid-word) and measures, for each confidence threshold, how often a
+    /// suggestion is shown and how often its first word is what came next.
+    static func calibrate() -> Never {
+        let engine = LlamaEngine()
+        guard let path = ModelManager.shared.activeModelURL?.path, (try? engine.load(path: path)) != nil else {
+            print("No model")
+            exit(1)
+        }
+        let corpus: [(app: String, text: String)] = [
+            ("Mail", "Hi Sarah, thanks for getting back to me so quickly. I'm running a few minutes late, so please start the meeting without me. I will join as soon as I can and catch up on the notes afterwards."),
+            ("Mail", "Dear hiring manager, I am writing to express my interest in the software engineer position at your company. I have five years of experience building web applications and I would love the opportunity to talk with you."),
+            ("Messages", "hey are you still coming to the party tonight? i was thinking we could get dinner first if you want. let me know what time works for you"),
+            ("Slack", "Quick update on the release: the build is green and QA signed off this morning. I will tag the new version after lunch, so let me know if anything else needs to go in before then."),
+            ("Messages", "thanks so much for helping me move today, i really appreciate it. let me know when you want to grab a beer and i will pay"),
+            ("Notes", "Things to do this weekend: clean the garage, call mom about the trip, pick up groceries for the week and finish reading the book for book club."),
+            ("Mail", "Thank you for your order. Your package has been shipped and should arrive within three to five business days. If you have any questions, please contact our support team."),
+        ]
+        let thresholds: [Float] = [0, 0.05, 0.08, 0.12, 0.16, 0.2, 0.25, 0.3, 0.4, 0.5]
+        var shown = [Int](repeating: 0, count: thresholds.count)
+        var firstRight = [Int](repeating: 0, count: thresholds.count)
+        var wordsRight = [Int](repeating: 0, count: thresholds.count)
+        var wordsShown = [Int](repeating: 0, count: thresholds.count)
+        var positions = 0
+
+        func words(_ s: String) -> [String] {
+            s.lowercased().split(whereSeparator: { $0.isWhitespace }).map { $0.trimmingCharacters(in: .punctuationCharacters) }
+        }
+
+        for (app, text) in corpus {
+            let allWords = text.split(separator: " ").map(String.init)
+            for i in 2..<allWords.count {
+                // At a word boundary, and (for longer words) two letters in.
+                var cases = [(allWords[..<i].joined(separator: " ") + " ", allWords[i...].joined(separator: " "))]
+                if allWords[i].count >= 5 {
+                    let typed = String(allWords[i].prefix(2))
+                    cases.append((allWords[..<i].joined(separator: " ") + " " + typed,
+                                  String(allWords[i].dropFirst(2)) + " " + allWords[(i + 1)...].joined(separator: " ")))
+                }
+                for (before, truth) in cases {
+                    positions += 1
+                    let prompt = PromptBuilder.build(textBefore: before, appName: app, windowTitle: nil)
+                    guard let output = engine.complete(prompt: prompt.text, maxTokens: 20, healLastToken: prompt.healLastToken,
+                                                       shouldContinue: { true }, stop: { PromptBuilder.shouldStop($0, maxWords: 7) }) else { continue }
+                    let midWord = !before.hasSuffix(" ")
+                    let truthWords = words(truth)
+                    for (t, threshold) in thresholds.enumerated() {
+                        let confident = PromptBuilder.confidentText(output.tokens, hitTokenLimit: output.hitTokenLimit, minProbability: threshold)
+                        guard let suggestion = PromptBuilder.clean(confident.text, prompt: prompt, maxWords: 7, hitTokenLimit: confident.hitTokenLimit) else { continue }
+                        // Mid-word, the first suggested "word" finishes the typed one.
+                        let suggested = words(midWord ? suggestion.drop(while: { $0.isWhitespace }).description : suggestion)
+                        guard !suggested.isEmpty else { continue }
+                        shown[t] += 1
+                        wordsShown[t] += suggested.count
+                        if suggested.first == truthWords.first { firstRight[t] += 1 }
+                        wordsRight[t] += zip(suggested, truthWords).prefix { $0 == $1 }.count
+                    }
+                }
+            }
+        }
+        print("positions: \(positions)")
+        print("threshold  shown   first word right   correct words / shown words")
+        for (t, threshold) in thresholds.enumerated() {
+            let coverage = Double(shown[t]) / Double(positions) * 100
+            let precision = shown[t] > 0 ? Double(firstRight[t]) / Double(shown[t]) * 100 : 0
+            let wordPrecision = wordsShown[t] > 0 ? Double(wordsRight[t]) / Double(wordsShown[t]) * 100 : 0
+            print(String(format: "  %.2f     %5.1f%%   %5.1f%%             %5.1f%%", threshold, coverage, precision, wordPrecision))
+        }
+        engine.unload()
+        exit(0)
+    }
+
     /// `OpenTypist --complete a.txt b.txt …`: greedy continuation of each raw
     /// prompt file, for tuning prompt formats.
     static func completeFiles(arguments: [String]) -> Never {
@@ -168,7 +264,7 @@ enum SelfTest {
 
     /// Learning, profile updates, lock, history, encryption and samples,
     /// against a throwaway store (never the Keychain or the user's data).
-    private static func personalizationChecks(engine: LlamaEngine) {
+    private static func personalizationChecks(engine: LlamaEngine?) {
         print("\n== Personalization")
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("opentypist-selftest-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -233,10 +329,11 @@ enum SelfTest {
         let profiles: [String?] = [nil, "I'm Alex Chen, a nurse in Toronto. I sign my emails \"Cheers, Alex\"."]
         for profile in profiles {
             let prompt = PromptBuilder.build(textBefore: text, appName: "Mail", windowTitle: nil, profile: profile)
+            if let profile { precondition(prompt.text.hasPrefix("About me:\n\(profile)"), "profile missing from prompt") }
+            guard let engine else { continue }
             let output = engine.complete(prompt: prompt.text, maxTokens: 6, healLastToken: false,
                                          shouldContinue: { true }, stop: { $0.contains("\n") })
             print("  profile \(profile == nil ? "off" : "on "): \"…Cheers,\\n\" → \(output.map { $0.text.debugDescription } ?? "nil")")
-            if let profile { precondition(prompt.text.hasPrefix("About me:\n\(profile)"), "profile missing from prompt") }
         }
 
         // Writing samples reach the prompt too, after the profile.
@@ -253,6 +350,7 @@ enum SelfTest {
         precondition(examples.count == 3 && header.hasPrefix("About me:\nI'm Alex.\n\nExamples of things I've written in Messages:\n\""))
         precondition(header.hasSuffix("Application: Messages\nWindow: Sam\nText being written:\n"))
         print("  samples: \(samples.samples.count) stored, \(examples.count) used in the prompt")
+        guard let engine else { return }
         for chat in [false, true] {
             let prompt = PromptBuilder.build(textBefore: "hey are you free tonight? i was thinking we could", appName: "Messages", windowTitle: "Sam",
                                              profile: "I'm Alex.", examples: chat ? examples : [])
@@ -264,7 +362,7 @@ enum SelfTest {
     }
 
     /// List matching (optionally with `--ahk file.ahk`) and model choices.
-    private static func autocorrectChecks(engine: LlamaEngine, arguments: [String]) {
+    private static func autocorrectChecks(engine: LlamaEngine?, arguments: [String]) {
         print("\n== Autocorrect lists")
         let rules = AutocorrectRules()
         if let url = Autocorrector.builtInListURL { print("built-in: \(rules.load(fileAt: url)) entries") }
@@ -279,7 +377,12 @@ enum SelfTest {
         }
         print("  conformCase: \(AutocorrectRules.conformCase(typed: "Teh", replacement: "the")), edit(teh, the) = \(SpellCheck.editDistance("teh", "the"))")
         print("  spell languages: \(SpellCheck.languages); 'loosing' valid: \(SpellCheck.isValidWord("loosing")); 'stoer' guesses: \(SpellCheck.guesses(for: "stoer"))")
+        precondition(rules.matchAtEnd(of: "I think teh") == .fix(replacement: "the", length: 3))
+        precondition(rules.matchAtEnd(of: "TEH") == .fix(replacement: "THE", length: 3))
+        precondition(rules.matchAtEnd(of: "We need to redesign") == nil)
+        precondition(SpellCheck.editDistance("teh", "the") == 1 && SpellCheck.adjacentKeys("e", "r") && !SpellCheck.adjacentKeys("t", "e"))
 
+        guard let engine else { return }
         print("\n== Model picks (log-probabilities; first entry is what was typed)")
         let picks: [(String, [String])] = [
             ("I worked hard all year to", ["achive", "achieve", "archive"]),

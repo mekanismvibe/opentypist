@@ -18,6 +18,7 @@ final class EngineService {
         var profile: String?
         var examples: [String] = []
         var length: CompletionLength
+        var minProbability: Float = 0
     }
 
     private let queue = DispatchQueue(label: "opentypist.engine", qos: .userInitiated)
@@ -94,10 +95,12 @@ final class EngineService {
                 prompt: prompt.text,
                 maxTokens: request.length.maxTokens,
                 healLastToken: prompt.healLastToken,
+                minProbability: request.minProbability,
                 shouldContinue: { self.isLatest(id) },
                 stop: { PromptBuilder.shouldStop($0, maxWords: maxWords) }
             ) else { return }
-            let text = PromptBuilder.clean(output.text, prompt: prompt, maxWords: maxWords, hitTokenLimit: output.hitTokenLimit)
+            let confident = PromptBuilder.confidentText(output.tokens, hitTokenLimit: output.hitTokenLimit, minProbability: request.minProbability)
+            let text = PromptBuilder.clean(confident.text, prompt: prompt, maxWords: maxWords, hitTokenLimit: confident.hitTokenLimit)
             DispatchQueue.main.async {
                 guard self.isLatest(id) else { return }
                 completion(text)

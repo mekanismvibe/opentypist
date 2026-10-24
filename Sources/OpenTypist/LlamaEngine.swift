@@ -22,8 +22,19 @@ enum EngineError: LocalizedError {
 /// keystroke usually only costs a couple of tokens of prompt processing.
 final class LlamaEngine {
     struct Output {
+        /// Text of the tokens that were kept.
         var text: String
         var hitTokenLimit: Bool
+        /// Every token considered, with the model's probability for it. When
+        /// generation stopped for low confidence, the last one is the token
+        /// that was rejected (it is not part of `text`).
+        var tokens: [GeneratedToken] = []
+        var stoppedForConfidence = false
+    }
+
+    struct GeneratedToken {
+        var bytes: [UInt8]
+        var probability: Float
     }
 
     private var model: OpaquePointer?
@@ -46,12 +57,9 @@ final class LlamaEngine {
         if ProcessInfo.processInfo.environment["OPENTYPIST_DEBUG"] == nil {
             llama_log_set({ _, _, _ in }, nil)
         }
-        // Inside the .app the ggml backends (Metal, CPU, BLAS) are bundled in
-        // Contents/Frameworks; otherwise fall back to the Homebrew install.
-        if let frameworks = Bundle.main.privateFrameworksPath,
-           FileManager.default.fileExists(atPath: frameworks + "/libggml-metal.so") {
-            ggml_backend_load_all_from_path(frameworks)
-        } else {
+        // The static build registers its backends (Metal, CPU, BLAS) itself;
+        // only a dynamic-backend build would need to load them from disk.
+        if ggml_backend_reg_count() == 0 {
             ggml_backend_load_all()
         }
         llama_backend_init()
@@ -145,11 +153,14 @@ final class LlamaEngine {
     /// being stuck with an unnatural token split.
     ///
     /// `stop` is called with the text generated so far after every token and
-    /// returns true to end generation. Returns nil if cancelled.
+    /// returns true to end generation. Generation also stops at the first
+    /// token whose probability is below `minProbability`: past that point the
+    /// model is guessing. Returns nil if cancelled.
     func complete(
         prompt: String,
         maxTokens: Int,
         healLastToken: Bool,
+        minProbability: Float = 0,
         shouldContinue: () -> Bool,
         stop: (String) -> Bool
     ) -> Output? {
@@ -175,23 +186,29 @@ final class LlamaEngine {
         var bytes: [UInt8] = []
         var text = ""
         var hitLimit = true
+        var generated: [GeneratedToken] = []
+        var stoppedForConfidence = false
 
         for step in 0..<maxTokens {
             guard shouldContinue() else { return nil }
             guard let logits = llama_get_logits_ith(ctx, -1) else { hitLimit = false; break }
 
             var next: llama_token
+            let probability: Float
             if step == 0, !healPrefix.isEmpty {
+                // Confidence among the tokens that can finish the half-typed word.
                 guard let healed = bestToken(startingWith: healPrefix, logits: logits) else {
                     hitLimit = false
                     break
                 }
-                next = healed
+                next = healed.token
+                probability = healed.probability
             } else {
                 var maxValue: Float = 0
                 var maxIndex: vDSP_Length = 0
                 vDSP_maxvi(logits, 1, &maxValue, &maxIndex, vDSP_Length(nVocab))
                 next = llama_token(maxIndex)
+                probability = exp(maxValue - logSumExp(logits))
             }
 
             if llama_vocab_is_eog(vocab, next) || llama_vocab_is_control(vocab, next) {
@@ -202,6 +219,12 @@ final class LlamaEngine {
             var piece = pieces[Int(next)]
             if step == 0, !healPrefix.isEmpty {
                 piece.removeFirst(min(healPrefix.count, piece.count))
+            }
+            generated.append(GeneratedToken(bytes: piece, probability: probability))
+            if probability < minProbability {
+                hitLimit = false
+                stoppedForConfidence = true
+                break
             }
             bytes += piece
             // A token can end in the middle of a multi-byte character; wait for the rest.
@@ -216,7 +239,7 @@ final class LlamaEngine {
             if stop(text) { hitLimit = false; break }
         }
 
-        return Output(text: text, hitTokenLimit: hitLimit)
+        return Output(text: text, hitTokenLimit: hitLimit, tokens: generated, stoppedForConfidence: stoppedForConfidence)
     }
 
     /// Brings the KV cache to exactly `tokens`, reusing the longest cached
@@ -326,18 +349,25 @@ final class LlamaEngine {
         return maxValue + log(sum)
     }
 
-    private func bestToken(startingWith prefix: [UInt8], logits: UnsafeMutablePointer<Float>) -> llama_token? {
+    /// Most likely token that starts with `prefix`, and its probability among
+    /// all such tokens.
+    private func bestToken(startingWith prefix: [UInt8], logits: UnsafeMutablePointer<Float>) -> (token: llama_token, probability: Float)? {
         let first = prefix[0]
         var best: llama_token?
         var bestValue = -Float.infinity
+        var candidateLogits: [Float] = []
         for id in 0..<nVocab {
             let candidate = pieces[id]
-            guard candidate.count >= prefix.count, candidate.first == first,
-                  logits[id] > bestValue, candidate.starts(with: prefix) else { continue }
-            if llama_vocab_is_control(vocab, llama_token(id)) { continue }
-            best = llama_token(id)
-            bestValue = logits[id]
+            guard candidate.count >= prefix.count, candidate.first == first, candidate.starts(with: prefix),
+                  !llama_vocab_is_control(vocab, llama_token(id)) else { continue }
+            candidateLogits.append(logits[id])
+            if logits[id] > bestValue {
+                best = llama_token(id)
+                bestValue = logits[id]
+            }
         }
-        return best
+        guard let best else { return nil }
+        let total = candidateLogits.reduce(Float(0)) { $0 + exp($1 - bestValue) }
+        return (best, 1 / total)
     }
 }

@@ -186,7 +186,8 @@ final class CompletionController {
             screenText: ScreenContext.shared.text(for: ctx),
             profile: Personalization.shared.promptProfile,
             examples: WritingSamples.shared.examples(bundleID: ctx.bundleID, windowTitle: ctx.windowTitle),
-            length: settings.length
+            length: settings.length,
+            minProbability: settings.confidence.minProbability
         )
         let started = Date()
         engine.complete(request) { [weak self] text in

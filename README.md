@@ -143,25 +143,62 @@ Input Monitoring.
 - Per-app disable list (terminals, IDEs and password managers are off by
   default), plus a "Disable in <current app>" toggle in the menu bar
 - Local stats: words accepted, keystrokes saved, accept rate
+- Confidence filter: a suggestion ends at the first word piece the model is
+  unsure about (and a half-finished word goes with it), and nothing is shown
+  if it's unsure from the start. Measured on sample messages with Gemma 4
+  E2B, "Balanced" shows a suggestion 74% of the time with 50% of suggested
+  words right, against 91% / 26% with no filter; "Fewer, more accurate" shows
+  ~55% of the time with ~73% right
 - Mid-word completion via token healing ("I'll be th" → "ere in about")
 - KV-cache reuse between keystrokes; around 150–200 ms per keystroke on an M5
 
-## Requirements
+## Install
 
-- macOS on Apple silicon. The binary targets macOS 14, but the bundled
-  Homebrew libraries are built for the macOS version that built the app.
+Download the DMG from the [latest release](https://github.com/mekanismvibe/opentypist/releases/latest),
+open it and drag OpenTypist into Applications. Requires Apple silicon and
+macOS 14 or later.
+
+Release builds aren't signed with an Apple Developer ID yet, so the first time
+you open the app macOS refuses: go to System Settings → Privacy & Security,
+scroll down and click **Open Anyway** (or run
+`xattr -dr com.apple.quarantine /Applications/OpenTypist.app`).
+
+After that OpenTypist updates itself. Once a day it checks the project's
+GitHub releases (turn this off in Settings → General → Updates, or use **Check
+for Updates…** in the menu). Installing an update downloads the DMG, verifies
+it against the published SHA-256, checks the app's bundle ID, version and code
+signature, swaps it in and relaunches.
+
+## Requirements for building
+
+- A Mac with Apple silicon
 - Swift 5.9+ (the Xcode Command Line Tools are enough)
-- `brew install llama.cpp`
+- CMake (`brew install cmake`); Ninja is used if installed
 
 ## Build
 
 ```bash
-./scripts/build-app.sh
+git clone --recursive https://github.com/mekanismvibe/opentypist
+cd opentypist
+./scripts/build-app.sh          # → build/OpenTypist.app
+./scripts/make-dmg.sh           # → build/OpenTypist-<version>.dmg (+ .sha256)
 ```
 
-This produces `build/OpenTypist.app` with llama.cpp, ggml, its Metal/CPU
-backends and libomp copied into `Contents/Frameworks`, so the app doesn't need
-Homebrew at runtime. Copy it to `/Applications` and launch it.
+llama.cpp is a git submodule (`vendor/llama.cpp`) pinned to a release.
+`scripts/build-llama.sh` builds it once into static libraries with the Metal
+shaders embedded, for macOS 14 and later, and the app links them in: the
+result is a single 12 MB app with no dependencies beyond macOS. Copy it to
+`/Applications` and launch it.
+
+### Releases
+
+Pushing a tag like `v0.3.0` runs `.github/workflows/release.yml`: it builds
+the app at that version, runs the offline self-test, makes the DMG and
+publishes a GitHub release with the DMG and its checksum, which the in-app
+updater then offers to everyone. Every push and pull request is built and
+tested by `.github/workflows/ci.yml`. Adding Developer ID secrets to the
+repository (listed at the top of `release.yml`) turns on signing and
+notarization.
 
 On first launch a setup guide walks through the permissions and lets you pick
 and download a model. It can be reopened from the menu bar (Setup Guide…).
@@ -184,6 +221,12 @@ swift build -c release
 
 This prints suggestions for sample text and per-keystroke latency.
 `OPENTYPIST_DEBUG=1` turns on llama.cpp logging. Other developer tools:
+
+- `OpenTypist --selftest-offline` runs every check that doesn't need a model
+  (this is what CI runs).
+- `OpenTypist --calibrate` replays sample messages and measures, per
+  confidence threshold, how often a suggestion appears and how often it's
+  right. This is how the confidence levels were chosen.
 
 - `OpenTypist --complete a.txt b.txt` prints the model's greedy continuation of
   each raw prompt file (for tuning prompt formats).

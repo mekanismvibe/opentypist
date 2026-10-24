@@ -1,0 +1,121 @@
+name: Release
+
+# Push a tag like v0.2.0 to build, test and publish a release with a DMG.
+# Run it by hand (workflow_dispatch) to get the DMG as a build artifact only.
+#
+# Optional Developer ID signing and notarization: add these repository
+# secrets and the app and DMG are signed and notarized automatically:
+#   MACOS_CERTIFICATE           base64 of a Developer ID Application .p12
+#   MACOS_CERTIFICATE_PASSWORD  its password
+#   MACOS_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(plutil -extract CFBundleShortVersionString raw Resources/Info.plist)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "rev=$(git rev-parse HEAD:vendor/llama.cpp)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: build/llama-install
+          key: llama-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.rev }}-${{ hashFiles('scripts/build-llama.sh') }}
+
+      - name: Build tools
+        run: |
+          command -v cmake || brew install cmake
+          command -v ninja || brew install ninja
+
+      - name: Import signing certificate
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          echo "CODESIGN_IDENTITY=$MACOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/build-app.sh
+
+      - name: Self-test (no model)
+        run: .build/release/OpenTypist --selftest-offline
+
+      - name: Disk image
+        run: ./scripts/make-dmg.sh
+
+      - name: Notarize
+        if: env.MACOS_CERTIFICATE != '' && env.APPLE_ID != ''
+        run: |
+          DMG="build/OpenTypist-${{ steps.version.outputs.version }}.dmg"
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$DMG"
+          (cd build && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenTypist-${{ steps.version.outputs.version }}
+          path: |
+            build/OpenTypist-*.dmg
+            build/OpenTypist-*.dmg.sha256
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ -n "$MACOS_CERTIFICATE" ]; then
+            OPEN_NOTE="Open the DMG and drag OpenTypist into Applications."
+          else
+            OPEN_NOTE="Open the DMG and drag OpenTypist into Applications. This build isn't signed with an Apple Developer ID, so the first time you open it macOS will refuse; go to System Settings → Privacy & Security, scroll down and click **Open Anyway** (or run \`xattr -dr com.apple.quarantine /Applications/OpenTypist.app\`). Updates installed from inside the app don't need this."
+          fi
+          cat > notes.md <<EOF
+          ## Install
+
+          $OPEN_NOTE
+
+          Requires a Mac with Apple silicon and macOS 14 or later. On first launch a setup guide asks for the permissions OpenTypist needs and lets you pick a model to download.
+
+          Already using OpenTypist? It updates itself: menu bar icon → Check for Updates….
+
+          SHA-256: \`$(cut -d' ' -f1 "build/OpenTypist-$VERSION.dmg.sha256")\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            "build/OpenTypist-$VERSION.dmg" "build/OpenTypist-$VERSION.dmg.sha256" \
+            --title "OpenTypist $VERSION" --notes-file notes.md --generate-notes --verify-tag

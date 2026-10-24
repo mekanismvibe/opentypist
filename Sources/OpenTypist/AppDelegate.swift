@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         startKeyboardMonitorWhenAllowed()
         loadModel()
+        Updater.shared.startAutomaticChecks()
 
         if UserDefaults.standard.integer(forKey: "onboardingVersion") < Self.onboardingVersion {
             showOnboarding()
@@ -202,6 +203,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if models.isDownloading {
             menu.addItem(item("Cancel Model Download", #selector(cancelDownload)))
         }
+        if let release = Updater.shared.availableRelease {
+            menu.addItem(item("Update to OpenTypist \(release.version)…", #selector(showGeneralSettings)))
+        } else {
+            menu.addItem(item("Check for Updates…", #selector(checkForUpdates)))
+        }
         if Personalization.shared.profile.proposal != nil {
             menu.addItem(item("Profile Update Ready…", #selector(showPersonalSettings)))
         }
@@ -263,6 +269,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func cancelDownload() { models.cancelDownload() }
 
     @objc private func openAccessibilitySettings() { AppActions.openAccessibilitySettings() }
+
+    @objc private func showGeneralSettings() {
+        ViewState.shared.settingsTab = "general"
+        showSettings()
+    }
+
+    @objc private func checkForUpdates() {
+        Updater.shared.check()
+        showGeneralSettings()
+    }
 
     @objc private func showPersonalSettings() {
         ViewState.shared.settingsTab = "personal"

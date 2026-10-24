@@ -31,6 +31,33 @@ enum CompletionLength: String, CaseIterable, Identifiable {
     }
 }
 
+/// How sure the model must be before a word is shown. Each generated token
+/// needs at least `minProbability`; the suggestion ends where one falls short.
+enum ConfidenceLevel: String, CaseIterable, Identifiable {
+    case more, balanced, fewer
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .more: return "More suggestions"
+        case .balanced: return "Balanced"
+        case .fewer: return "Fewer, more accurate"
+        }
+    }
+
+    /// Measured with `OpenTypist --calibrate` (283 positions in 7 messages,
+    /// Gemma 4 E2B): no filter shows 91% of the time with 26% of suggested
+    /// words right; 0.12 → 86% / 36%; 0.25 → 74% / 50%; 0.45 → ~55% / ~73%.
+    var minProbability: Float {
+        switch self {
+        case .more: return 0.12
+        case .balanced: return 0.25
+        case .fewer: return 0.45
+        }
+    }
+}
+
 final class Settings: ObservableObject {
     static let shared = Settings()
 
@@ -53,6 +80,7 @@ final class Settings: ObservableObject {
 
     @Published var enabled: Bool { didSet { defaults.set(enabled, forKey: "enabled") } }
     @Published var length: CompletionLength { didSet { defaults.set(length.rawValue, forKey: "length") } }
+    @Published var confidence: ConfidenceLevel { didSet { defaults.set(confidence.rawValue, forKey: "confidence") } }
     @Published var useAppContext: Bool { didSet { defaults.set(useAppContext, forKey: "useAppContext") } }
     /// Read visible window text (needs Screen Recording) and add it to the prompt.
     @Published var useScreenContext: Bool { didSet { defaults.set(useScreenContext, forKey: "useScreenContext") } }
@@ -64,6 +92,7 @@ final class Settings: ObservableObject {
     /// Add a space after an accepted word or a finished suggestion.
     @Published var acceptTrailingSpace: Bool { didSet { defaults.set(acceptTrailingSpace, forKey: "acceptTrailingSpace") } }
     @Published var showMenuBarIcon: Bool { didSet { defaults.set(showMenuBarIcon, forKey: "showMenuBarIcon") } }
+    @Published var checkForUpdates: Bool { didSet { defaults.set(checkForUpdates, forKey: "checkForUpdates") } }
     /// Put the profile at the top of every prompt.
     @Published var useProfile: Bool { didSet { defaults.set(useProfile, forKey: "useProfile") } }
     /// Learn names, words, spelling and greetings from what the user types.
@@ -85,12 +114,14 @@ final class Settings: ObservableObject {
             "autocorrectEnabled": true,
             "aiTypoFix": true,
             "showMenuBarIcon": true,
+            "checkForUpdates": true,
             "useProfile": true,
             "learnHabits": true,
             "keepWritingSamples": false,
             "disabledApps": Self.defaultDisabledApps,
         ])
         showMenuBarIcon = defaults.bool(forKey: "showMenuBarIcon")
+        checkForUpdates = defaults.bool(forKey: "checkForUpdates")
         useProfile = defaults.bool(forKey: "useProfile")
         learnHabits = defaults.bool(forKey: "learnHabits")
         keepWritingSamples = defaults.bool(forKey: "keepWritingSamples")
@@ -98,6 +129,7 @@ final class Settings: ObservableObject {
         aiTypoFix = defaults.bool(forKey: "aiTypoFix")
         enabled = defaults.bool(forKey: "enabled")
         length = CompletionLength(rawValue: defaults.string(forKey: "length") ?? "") ?? .medium
+        confidence = ConfidenceLevel(rawValue: defaults.string(forKey: "confidence") ?? "") ?? .balanced
         useAppContext = defaults.bool(forKey: "useAppContext")
         useScreenContext = defaults.bool(forKey: "useScreenContext")
         selectedModelID = defaults.string(forKey: "selectedModelID") ?? ModelCatalog.defaultID
