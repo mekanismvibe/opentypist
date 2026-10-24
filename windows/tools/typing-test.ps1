@@ -13,7 +13,8 @@ Start OpenTypist with $env:OPENTYPIST_LOG = '1' first (this script does it if
 OpenTypist isn't running). Edge runs with a throwaway profile in -Out.
 #>
 param(
-    [ValidateSet('notepad', 'edge')] [string]$Target = 'notepad',
+    # edge-password: a password field, where no suggestion may appear.
+    [ValidateSet('notepad', 'edge', 'edge-password')] [string]$Target = 'notepad',
     [string]$Exe = (Join-Path $PSScriptRoot '..\..\build\windows\OpenTypist\OpenTypist.exe'),
     [string]$Out = (Join-Path $env:TEMP 'opentypist-typing-test'),
     [int]$KeyDelay = 70,
@@ -99,6 +100,16 @@ public static class TypingTest {
         Key(0x11, true, 0);
     }
 
+    public static void PressCtrlShift(ushort vk) {
+        CheckFocus();
+        Key(0x11, false, 0);
+        Key(0x10, false, 0);
+        Key(vk, false, 0);
+        Key(vk, true, 0);
+        Key(0x10, true, 0);
+        Key(0x11, true, 0);
+    }
+
     [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
     [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
     [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dest, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
@@ -133,11 +144,14 @@ while (-not ((Test-Path $log) -and (Select-String -Path $log -Pattern 'engine: R
 
 function Get-FieldText {
     $element = [Windows.Automation.AutomationElement]::FocusedElement
+    if ($element.Current.IsPassword) { return '<password field>' }
     $pattern = $null
-    if ($element.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
-        return ($pattern.DocumentRange.GetText(-1) -replace "`r`n?", "`n")
-    }
-    if ($element.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) { return $pattern.Current.Value }
+    try {
+        if ($element.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
+            return ($pattern.DocumentRange.GetText(-1) -replace "`r`n?", "`n")
+        }
+        if ($element.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) { return $pattern.Current.Value }
+    } catch { }
     return '<unreadable>'
 }
 
@@ -163,13 +177,16 @@ if ($Target -eq 'notepad') {
     $file = Join-Path $Out "typing-test-$(Get-Date -Format HHmmss).txt"
     Set-Content -Path $file -Value '' -NoNewline
     $process = Start-Process notepad.exe -ArgumentList "`"$file`"" -PassThru
-    $title = 'typing-test'
+    $title = [IO.Path]::GetFileNameWithoutExtension($file)
 } else {
-    $page = Join-Path $Out 'typing-test.html'
-    Set-Content -Path $page -Encoding UTF8 -Value '<!doctype html><title>OpenTypist typing test</title><body style="font:16px Segoe UI;margin:40px"><textarea autofocus style="font:16px Segoe UI;width:760px;height:220px"></textarea></body>'
+    $page = Join-Path $Out "$Target.html"
+    $field = if ($Target -eq 'edge-password') { '<input type="password" autofocus style="font:16px Segoe UI;width:760px">' }
+             else { '<textarea autofocus style="font:16px Segoe UI;width:760px;height:220px"></textarea>' }
+    # A title of its own, so a test window left from another run is never typed into.
+    $title = "OpenTypist typing test $(Get-Date -Format HHmmss)"
+    Set-Content -Path $page -Encoding UTF8 -Value "<!doctype html><title>$title</title><body style=`"font:16px Segoe UI;margin:40px`">$field</body>"
     $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
     $process = Start-Process $edge -ArgumentList "--user-data-dir=`"$Out\edge-profile`"", '--no-first-run', '--no-default-browser-check', '--new-window', "`"file:///$($page -replace '\\','/')`"" -PassThru
-    $title = 'OpenTypist typing test'
 }
 $deadline = (Get-Date).AddSeconds(30)
 do {
@@ -183,14 +200,14 @@ Start-Sleep -Milliseconds 1500
 for ($i = 0; $i -lt $ZoomSteps; $i++) { [TypingTest]::PressCtrl(0xBB); Start-Sleep -Milliseconds 300 }
 $since = (Get-Date).ToString('HH:mm:ss.fff')
 
-$steps = @(
+$steps = if ($Target -eq 'edge-password') { @(@{ Name = '1-password'; Type = "Thanks for the update! Let me know if you need anything el" }) } else { @(
     @{ Name = '1-typed'; Type = "Hi Sarah, thanks for getting back to me so quickly. I'm running a few minutes late, so " },
     @{ Name = '2-shift-tab'; Key = 0x09; Shift = $true },
     @{ Name = '3-midword'; Type = "`n`nI am very in" },
     @{ Name = '4-tab'; Key = 0x09 },
     @{ Name = '5-typed'; Type = "`n`nThanks for the update! Let me know if you need anything el" },
     @{ Name = '6-tab'; Key = 0x09 }
-)
+) }
 foreach ($step in $steps) {
     $before = Get-FieldText
     if ($step.Type) { [TypingTest]::Type($step.Type, $KeyDelay) }
@@ -212,5 +229,6 @@ if ($Target -eq 'notepad') {
     Start-Sleep -Milliseconds 500
     [TypingTest]::PressCtrl(0x57)   # Ctrl+W
 } else {
-    $window.CloseMainWindow() | Out-Null
+    # Ctrl+Shift+W closes the test window; the throwaway profile has only this one.
+    [TypingTest]::PressCtrlShift(0x57)
 }
