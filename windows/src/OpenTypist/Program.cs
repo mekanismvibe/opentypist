@@ -23,6 +23,9 @@ public static class Program
         {
             try
             {
+                // This process was just started by the user, so it may bring
+                // windows to the front; let the running instance do it.
+                Win32.AllowSetForegroundWindow(Win32.ASFW_ANY);
                 using var show = EventWaitHandle.OpenExisting(ShowSettingsEventName);
                 show.Set();
             }

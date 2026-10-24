@@ -269,6 +269,12 @@ internal static class Win32
     [DllImport("kernel32.dll")]
     public static extern IntPtr GetCurrentProcess();
 
+    public const int ASFW_ANY = -1;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AllowSetForegroundWindow(int dwProcessId);
+
     // Console (for --selftest from a terminal)
 
     public const int ATTACH_PARENT_PROCESS = -1;
