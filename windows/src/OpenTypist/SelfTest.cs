@@ -187,10 +187,7 @@ public static class SelfTest
         Console.WriteLine($"Downloading {model.Name} ({model.SizeText}) from {model.Url}");
         models.StartDownload(model).Wait();
         if (!models.IsDownloaded(model)) return 1;
-        var settings = AppSettings.Load();
-        settings.SelectedModelId = model.Id;
-        settings.Save();
-        Console.WriteLine($"Done: {models.FileFor(model)}");
+        Console.WriteLine($"Done: {models.FileFor(model)} (choose it in Settings > Model, or pass --model to --selftest)");
         return 0;
     }
 
