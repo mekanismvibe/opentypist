@@ -8,6 +8,8 @@ final class AppStatus: ObservableObject {
 
     @Published var engine: EngineService.State = .idle
     @Published var keyboardTapRunning = false
+    /// How long the last model load took (shown next to the unload option).
+    @Published var lastModelLoadSeconds: Double?
     /// For the settings window (list counts, importing).
     var autocorrector: Autocorrector?
     /// What happened on the last completion attempt, in plain words. Never

@@ -56,6 +56,17 @@ enum ConfidenceLevel: String, CaseIterable, Identifiable {
         case .fewer: return 0.45
         }
     }
+
+    /// Looser bar for finishing a half-typed word, which is right far more
+    /// often than the words after it. Measured on 230 half-typed words: at
+    /// "fewer", 0.45 alone hid 12.6% of completions; 0.15 shows 98.7%, 88% right.
+    var wordMinProbability: Float {
+        switch self {
+        case .more: return 0.06
+        case .balanced: return 0.1
+        case .fewer: return 0.15
+        }
+    }
 }
 
 final class Settings: ObservableObject {
@@ -81,6 +92,21 @@ final class Settings: ObservableObject {
     @Published var enabled: Bool { didSet { defaults.set(enabled, forKey: "enabled") } }
     @Published var length: CompletionLength { didSet { defaults.set(length.rawValue, forKey: "length") } }
     @Published var confidence: ConfidenceLevel { didSet { defaults.set(confidence.rawValue, forKey: "confidence") } }
+    @Published var midLineSuggestions: Bool { didSet { defaults.set(midLineSuggestions, forKey: "midLineSuggestions") } }
+    @Published var textReplacementsEnabled: Bool { didSet { defaults.set(textReplacementsEnabled, forKey: "textReplacementsEnabled") } }
+    /// Free the model's memory after `idleUnloadMinutes` without typing.
+    @Published var unloadWhenIdle: Bool { didSet { defaults.set(unloadWhenIdle, forKey: "unloadWhenIdle") } }
+    @Published var idleUnloadMinutes: Int { didSet { defaults.set(idleUnloadMinutes, forKey: "idleUnloadMinutes") } }
+    @Published var batteryBehavior: PowerBehavior { didSet { defaults.set(batteryBehavior.rawValue, forKey: "batteryBehavior") } }
+    @Published var lowPowerBehavior: PowerBehavior { didSet { defaults.set(lowPowerBehavior.rawValue, forKey: "lowPowerBehavior") } }
+    /// Model used on battery / in Low Power Mode when set to "smaller model".
+    @Published var smallerModelID: String { didSet { defaults.set(smallerModelID, forKey: "smallerModelID") } }
+    @Published var useSystemReplacements: Bool {
+        didSet {
+            defaults.set(useSystemReplacements, forKey: "useSystemReplacements")
+            TextReplacements.shared.settingsChanged()
+        }
+    }
     @Published var useAppContext: Bool { didSet { defaults.set(useAppContext, forKey: "useAppContext") } }
     /// Read visible window text (needs Screen Recording) and add it to the prompt.
     @Published var useScreenContext: Bool { didSet { defaults.set(useScreenContext, forKey: "useScreenContext") } }
@@ -130,12 +156,39 @@ final class Settings: ObservableObject {
         enabled = defaults.bool(forKey: "enabled")
         length = CompletionLength(rawValue: defaults.string(forKey: "length") ?? "") ?? .medium
         confidence = ConfidenceLevel(rawValue: defaults.string(forKey: "confidence") ?? "") ?? .balanced
+        midLineSuggestions = defaults.object(forKey: "midLineSuggestions") as? Bool ?? true
+        textReplacementsEnabled = defaults.object(forKey: "textReplacementsEnabled") as? Bool ?? true
+        unloadWhenIdle = defaults.bool(forKey: "unloadWhenIdle")
+        idleUnloadMinutes = defaults.object(forKey: "idleUnloadMinutes") as? Int ?? 15
+        batteryBehavior = PowerBehavior(rawValue: defaults.string(forKey: "batteryBehavior") ?? "") ?? .normal
+        lowPowerBehavior = PowerBehavior(rawValue: defaults.string(forKey: "lowPowerBehavior") ?? "") ?? .normal
+        smallerModelID = defaults.string(forKey: "smallerModelID") ?? "qwen3-1.7b"
+        useSystemReplacements = defaults.object(forKey: "useSystemReplacements") as? Bool ?? true
+        acceptKeys = Self.loadCodable(AcceptKeys.self, forKey: "acceptKeys") ?? .standard
+        appAcceptKeys = Self.loadCodable([String: AcceptKeys].self, forKey: "appAcceptKeys") ?? [:]
         useAppContext = defaults.bool(forKey: "useAppContext")
         useScreenContext = defaults.bool(forKey: "useScreenContext")
         selectedModelID = defaults.string(forKey: "selectedModelID") ?? ModelCatalog.defaultID
         acceptTrailingSpace = defaults.bool(forKey: "acceptTrailingSpace")
         disabledApps = defaults.stringArray(forKey: "disabledApps") ?? Self.defaultDisabledApps
         customModelPath = defaults.string(forKey: "customModelPath")
+    }
+
+    /// Keys that accept the next word / the whole suggestion.
+    @Published var acceptKeys: AcceptKeys { didSet { saveCodable(acceptKeys, forKey: "acceptKeys") } }
+    /// Per-app replacements for `acceptKeys`, by bundle ID.
+    @Published var appAcceptKeys: [String: AcceptKeys] { didSet { saveCodable(appAcceptKeys, forKey: "appAcceptKeys") } }
+
+    func acceptKeys(for bundleID: String?) -> AcceptKeys {
+        bundleID.flatMap { appAcceptKeys[$0] } ?? acceptKeys
+    }
+
+    private func saveCodable<T: Encodable>(_ value: T, forKey key: String) {
+        defaults.set(try? JSONEncoder().encode(value), forKey: key)
+    }
+
+    private static func loadCodable<T: Decodable>(_ type: T.Type, forKey key: String) -> T? {
+        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(T.self, from: $0) }
     }
 
     func isDisabled(bundleID: String?) -> Bool {
@@ -163,10 +216,13 @@ final class Stats: ObservableObject {
     @Published private(set) var suggestionsShown: Int
     @Published private(set) var wordsToday: Int
     @Published private(set) var correctionsMade: Int
+    /// Words accepted per day ("yyyy-MM-dd" → count), last 120 days.
+    @Published private(set) var dailyWords: [String: Int]
     private var day: String
 
     private init() {
         correctionsMade = defaults.integer(forKey: "stats.corrections")
+        dailyWords = defaults.dictionary(forKey: "stats.daily") as? [String: Int] ?? [:]
         wordsAccepted = defaults.integer(forKey: "stats.words")
         charactersInserted = defaults.integer(forKey: "stats.chars")
         acceptKeyPresses = defaults.integer(forKey: "stats.presses")
@@ -190,6 +246,8 @@ final class Stats: ObservableObject {
         let words = text.split(whereSeparator: { $0.isWhitespace }).count
         wordsAccepted += words
         wordsToday += words
+        dailyWords[day, default: 0] += words
+        if dailyWords.count > 120, let oldest = dailyWords.keys.min() { dailyWords[oldest] = nil }
         charactersInserted += text.count
         acceptKeyPresses += 1
         save()
@@ -200,7 +258,24 @@ final class Stats: ObservableObject {
         save()
     }
 
+    /// For `--snapshot-personal` previews only (test store mode).
+    func setDailyWordsForPreview(_ days: [String: Int]) {
+        guard ProcessInfo.processInfo.environment["OPENTYPIST_TEST_STORE"] != nil else { return }
+        dailyWords = days
+    }
+
+    /// The last `days` days, oldest first, with zero for days without typing.
+    func recentDays(_ days: Int) -> [(date: Date, words: Int)] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        return (0..<days).reversed().compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
+            return (date, dailyWords[Self.dayKey(date)] ?? 0)
+        }
+    }
+
     func reset() {
+        dailyWords = [:]
         correctionsMade = 0
         wordsAccepted = 0
         charactersInserted = 0
@@ -225,12 +300,17 @@ final class Stats: ObservableObject {
         defaults.set(suggestionsShown, forKey: "stats.shown")
         defaults.set(wordsToday, forKey: "stats.wordsToday")
         defaults.set(correctionsMade, forKey: "stats.corrections")
+        defaults.set(dailyWords, forKey: "stats.daily")
         defaults.set(day, forKey: "stats.day")
     }
 
     private static func today() -> String {
+        dayKey(Date())
+    }
+
+    private static func dayKey(_ date: Date) -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
+        return f.string(from: date)
     }
 }

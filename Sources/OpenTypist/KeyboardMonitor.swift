@@ -104,7 +104,28 @@ enum TextInserter {
         replay.post(tap: .cghidEventTap)
     }
 
+    /// Line breaks are sent as Shift-Return, which adds a new line in chat
+    /// apps (where a plain Return would send the message) as well as in
+    /// ordinary text fields.
     static func type(_ text: String) {
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        for (index, line) in lines.enumerated() {
+            if index > 0 { pressShiftReturn() }
+            typeLine(line)
+        }
+    }
+
+    private static func pressShiftReturn() {
+        let source = CGEventSource(stateID: .privateState)
+        for keyDown in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: keyDown) else { continue }
+            event.flags = .maskShift
+            event.setIntegerValueField(.eventSourceUserData, value: marker)
+            event.post(tap: .cghidEventTap)
+        }
+    }
+
+    private static func typeLine(_ text: String) {
         let source = CGEventSource(stateID: .privateState)
         let units = Array(text.utf16)
         var index = 0

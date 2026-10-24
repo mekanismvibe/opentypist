@@ -35,19 +35,18 @@ final class CompletionController {
     /// the key was used (and must be swallowed).
     func handleSuggestionKey(_ event: CGEvent) -> Bool {
         guard overlay.isVisible, let visible = visibleText else { return false }
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags
-        guard !flags.contains(.maskCommand), !flags.contains(.maskControl) else { return false }
-
-        if keyCode == KeyCode.tab, !flags.contains(.maskAlternate) {
-            if flags.contains(.maskShift) {
-                accept(visible)
-            } else {
-                accept(Suggestion.nextWord(of: visible, includeTrailingSpace: settings.acceptTrailingSpace))
-            }
+        let keys = settings.acceptKeys(for: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        if keys.all.matches(event) {
+            accept(visible)
             return true
         }
-        if keyCode == KeyCode.escape {
+        if keys.word.matches(event) {
+            accept(Suggestion.nextWord(of: visible, includeTrailingSpace: settings.acceptTrailingSpace))
+            return true
+        }
+        let flags = event.flags
+        if event.getIntegerValueField(.keyboardEventKeycode) == KeyCode.escape,
+           !flags.contains(.maskCommand), !flags.contains(.maskControl) {
             dismiss()
             suppressed = true
             return true
@@ -153,10 +152,16 @@ final class CompletionController {
         guard let caret = ctx.caretRect else { return skip("\(ctx.appName): the app doesn't report where the caret is") }
 
         let before = ctx.textBefore
-        // Only complete at the end of a line, with some text to go on.
-        guard ctx.textAfterOnLine.trimmingCharacters(in: .whitespaces).isEmpty else {
-            return skip("\(ctx.appName): caret is in the middle of a line")
+        // In the middle of a line, suggest short insertions that lead into
+        // the text after the caret (never inside a word).
+        let midLine = !ctx.textAfterOnLine.trimmingCharacters(in: .whitespaces).isEmpty
+        if midLine {
+            guard settings.midLineSuggestions else { return skip("\(ctx.appName): caret is in the middle of a line") }
+            if let next = ctx.textAfterOnLine.first, next.isLetter || next.isNumber {
+                return skip("\(ctx.appName): caret is inside a word")
+            }
         }
+        let textAfter = midLine ? ctx.textAfterOnLine : ""
         guard let last = before.last, !last.isNewline,
               before.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3 else {
             return skip("\(ctx.appName): not enough text before the caret yet")
@@ -186,8 +191,10 @@ final class CompletionController {
             screenText: ScreenContext.shared.text(for: ctx),
             profile: Personalization.shared.promptProfile,
             examples: WritingSamples.shared.examples(bundleID: ctx.bundleID, windowTitle: ctx.windowTitle),
-            length: settings.length,
-            minProbability: settings.confidence.minProbability
+            length: midLine ? .short : settings.length,
+            minProbability: settings.confidence.minProbability,
+            wordMinProbability: settings.confidence.wordMinProbability,
+            textAfter: textAfter
         )
         let started = Date()
         engine.complete(request) { [weak self] text in
@@ -208,7 +215,15 @@ final class CompletionController {
 
     private func show(_ text: String, context: FocusContext, caret: CGRect) {
         visibleText = text
-        overlay.show(text, at: caret, style: context.style, wrap: wrapGuide(for: text, context: context, caret: caret))
+        let keys = settings.acceptKeys(for: context.bundleID)
+        // Mid-line, ghost text would sit on top of the text after the caret,
+        // so the suggestion goes in a small bubble just below the line.
+        if !context.textAfterOnLine.trimmingCharacters(in: .whitespaces).isEmpty {
+            overlay.show(text, at: caret, style: context.style, wrap: nil, hint: keys.word.hintLabel, bubble: true)
+        } else {
+            overlay.show(text, at: caret, style: context.style, wrap: wrapGuide(for: text, context: context, caret: caret),
+                         hint: keys.word.hintLabel)
+        }
     }
 
     /// Where multi-line fields wrap: the field's right edge (less the same
@@ -224,7 +239,8 @@ final class CompletionController {
             right = min(right, screen.visibleFrame.maxX - 4)
         }
 
-        let needed = min(right, caret.maxX + overlay.width(of: text, style: ctx.style, caret: caret))
+        let hint = settings.acceptKeys(for: ctx.bundleID).word.hintLabel
+        let needed = min(right, caret.maxX + overlay.width(of: text, style: ctx.style, caret: caret, hint: hint))
         let key = "\(ctx.pid):\(CFHash(ctx.element)):\(Int(caret.midY))"
         var obstacle: CGFloat?
         if let cache = obstacleCache, cache.key == key, cache.x != nil || cache.checkedTo >= needed {

@@ -27,6 +27,10 @@ final class ViewState: ObservableObject {
     @Published var profileDraft = Personalization.shared.profile.text
     @Published var profileDraftBase = Personalization.shared.profile.text
     @Published var newNeverCorrectWord = ""
+    @Published var newSnippetShortcut = ""
+    @Published var newSnippetExpansion = ""
+    @Published var snippetMessage: String?
+    @Published var hoveredStatsDay: Date?
     @Published var showingSamples = false
 
     private var timer: AnyCancellable?
@@ -65,6 +69,23 @@ final class ViewState: ObservableObject {
                 self.refreshPermissions()
             }
         )
+    }
+}
+
+/// Button showing a key; click it and press another key to change it.
+struct KeyRecorderField: View {
+    let id: String
+    @Binding var combo: KeyCombo
+    @ObservedObject private var recorder = KeyRecorder.shared
+
+    var body: some View {
+        Button {
+            if recorder.recording == id { recorder.stop() } else { recorder.start(id) { combo = $0 } }
+        } label: {
+            Text(recorder.recording == id ? "Press a key…" : combo.displayName)
+                .frame(minWidth: 96)
+        }
+        .help("Click, then press the key (with any modifiers) to use. Esc cancels.")
     }
 }
 

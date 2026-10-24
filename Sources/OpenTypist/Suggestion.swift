@@ -157,13 +157,19 @@ enum PromptBuilder {
     /// The part of the generated text the model was confident about: tokens
     /// up to the first one below `minProbability`. If that token would have
     /// continued the current word, the half-finished word goes too.
-    static func confidentText(_ tokens: [LlamaEngine.GeneratedToken], hitTokenLimit: Bool, minProbability: Float) -> (text: String, hitTokenLimit: Bool) {
-        guard let cut = tokens.firstIndex(where: { $0.probability < minProbability }) else {
+    /// Pieces that finish a half-typed word use the looser
+    /// `wordMinProbability`, so the word gets completed even when the words
+    /// after it are too uncertain to show.
+    static func confidentText(_ tokens: [LlamaEngine.GeneratedToken], hitTokenLimit: Bool, minProbability: Float,
+                              wordMinProbability: Float? = nil) -> (text: String, hitTokenLimit: Bool) {
+        let cutIndex = tokens.firstIndex { token in
+            token.probability < (token.finishesWord ? (wordMinProbability ?? minProbability) : minProbability)
+        }
+        guard let cut = cutIndex else {
             return (String(decoding: tokens.flatMap(\.bytes), as: UTF8.self), hitTokenLimit)
         }
         var text = String(decoding: tokens[..<cut].flatMap(\.bytes), as: UTF8.self)
-        let next = tokens[cut].bytes.first
-        let startsNewWord = next.map { $0 == 0x20 || $0 == 0x0A || $0 == 0x09 || (0x21...0x2F).contains($0) || (0x3A...0x40).contains($0) } ?? true
+        let startsNewWord = tokens[cut].bytes.isEmpty || tokens[cut].startsNewWord
         if !startsNewWord {
             if let space = text.lastIndex(where: { $0.isWhitespace }), text[..<space].contains(where: { !$0.isWhitespace }) {
                 text = String(text[..<space])
@@ -172,6 +178,36 @@ enum PromptBuilder {
             }
         }
         return (text, false)
+    }
+
+    /// Mid-line, the suggestion must lead into the text after the caret, not
+    /// repeat it: "terested in this job" before " this job" becomes
+    /// "terested in". Returns nil if nothing is left to insert.
+    static func fitBefore(_ after: String, suggestion: String) -> String? {
+        func normalized(_ s: String) -> [String] {
+            s.lowercased().split(whereSeparator: { $0.isWhitespace })
+                .map { $0.trimmingCharacters(in: .punctuationCharacters) }
+                .filter { !$0.isEmpty }
+        }
+        let afterWords = normalized(after)
+        var result = suggestion
+        if !afterWords.isEmpty {
+            let probe = Array(afterWords.prefix(2))
+            let words = splitWords(suggestion)
+            for i in words.indices {
+                let rest = normalized(words[i...].joined())
+                if rest.starts(with: probe) || (probe.count == 2 && rest == [probe[0]]) {
+                    result = words[..<i].joined()
+                    break
+                }
+            }
+        }
+        // Punctuation right after the caret is already there.
+        if let next = after.trimmingCharacters(in: .whitespaces).first, next.isPunctuation {
+            while let last = result.last, last.isPunctuation { result.removeLast() }
+        }
+        while result.last?.isWhitespace == true { result.removeLast() }
+        return result.contains(where: { $0.isLetter || $0.isNumber }) ? result : nil
     }
 
     /// Splits into words, each keeping its leading whitespace.

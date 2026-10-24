@@ -48,17 +48,21 @@ final class OverlayWindow {
         style.font ?? .systemFont(ofSize: min(28, max(11, caret.height * 0.78)))
     }
 
-    /// Width of `text` on one line, including the Tab hint.
-    func width(of text: String, style: TextStyle, caret: CGRect) -> CGFloat {
+    /// Width of `text` on one line, including the accept-key hint.
+    func width(of text: String, style: TextStyle, caret: CGRect, hint: String = "tab") -> CGFloat {
         let font = Self.font(for: style, caret: caret)
-        return GhostTextView.measure(text, font: font) + GhostTextView.hintWidth(font: font) + GhostTextView.hintGap
+        return GhostTextView.measure(text, font: font) + GhostTextView.hintWidth(hint, font: font) + GhostTextView.hintGap
     }
 
-    func show(_ text: String, at caret: CGRect, style: TextStyle, wrap: WrapGuide?) {
+    /// `hint` names the accept key. With `bubble`, the suggestion is drawn on
+    /// a small card just below the caret's line instead of inline (used in
+    /// the middle of a line, where inline text would cover what follows).
+    func show(_ text: String, at caret: CGRect, style: TextStyle, wrap: WrapGuide?, hint: String = "tab", bubble: Bool = false) {
+        if bubble { return showBubble(text, at: caret, style: style, hint: hint) }
         let font = Self.font(for: style, caret: caret)
         let color = style.color.map { Self.ghostColor(from: $0) } ?? Self.fallbackColor
         let lineHeight = max(caret.height, NSLayoutManager().defaultLineHeight(for: font))
-        let hintWidth = GhostTextView.hintWidth(font: font) + GhostTextView.hintGap
+        let hintWidth = GhostTextView.hintWidth(hint, font: font) + GhostTextView.hintGap
 
         // Lay out the words: first line from the caret, the rest from the line start.
         var lines: [String] = []
@@ -89,7 +93,26 @@ final class OverlayWindow {
             frame.origin.x = min(frame.origin.x, screen.visibleFrame.maxX - frame.width)
         }
 
-        view.configure(lines: placed, font: font, color: color, lineHeight: lineHeight, showHint: showHint)
+        view.configure(lines: placed, font: font, color: color, lineHeight: lineHeight, hint: showHint ? hint : nil)
+        panel.setFrame(frame, display: false)
+        view.needsDisplay = true
+        panel.orderFrontRegardless()
+        isVisible = true
+    }
+
+    private func showBubble(_ text: String, at caret: CGRect, style: TextStyle, hint: String) {
+        let font = Self.font(for: style, caret: caret)
+        let padding = GhostTextView.bubblePadding
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: font) + 4
+        let trimmed = text.drop(while: \.isWhitespace)
+        let width = GhostTextView.measure(String(trimmed), font: font) + GhostTextView.hintGap
+            + GhostTextView.hintWidth(hint, font: font) + padding * 2
+        var frame = NSRect(x: caret.maxX - padding, y: caret.minY - lineHeight - 3, width: width, height: lineHeight)
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(caret.origin) }) {
+            frame.origin.x = min(frame.origin.x, screen.visibleFrame.maxX - width)
+        }
+        view.configure(lines: [(String(trimmed), padding)], font: font, color: .secondaryLabelColor,
+                       lineHeight: lineHeight, hint: hint, bubble: true)
         panel.setFrame(frame, display: false)
         view.needsDisplay = true
         panel.orderFrontRegardless()
@@ -130,15 +153,17 @@ final class OverlayWindow {
     }
 }
 
-/// Draws the laid-out ghost text lines and the Tab hint.
+/// Draws the laid-out ghost text lines and the accept-key hint.
 private final class GhostTextView: NSView {
     static let hintGap: CGFloat = 6
+    static let bubblePadding: CGFloat = 7
 
     private var lines: [(text: String, x: CGFloat)] = []
     private var font = NSFont.systemFont(ofSize: 13)
     private var color = NSColor.gray
     private var lineHeight: CGFloat = 16
-    private var showHint = true
+    private var hint: String?
+    private var bubble = false
 
     override var isFlipped: Bool { true }
 
@@ -150,30 +175,39 @@ private final class GhostTextView: NSView {
         .systemFont(ofSize: max(8, font.pointSize * 0.55), weight: .medium)
     }
 
-    static func hintWidth(font: NSFont) -> CGFloat {
-        measure("tab", font: hintFont(for: font)) + 8
+    static func hintWidth(_ hint: String, font: NSFont) -> CGFloat {
+        measure(hint, font: hintFont(for: font)) + 8
     }
 
-    func configure(lines: [(text: String, x: CGFloat)], font: NSFont, color: NSColor, lineHeight: CGFloat, showHint: Bool) {
+    func configure(lines: [(text: String, x: CGFloat)], font: NSFont, color: NSColor, lineHeight: CGFloat,
+                   hint: String?, bubble: Bool = false) {
         self.lines = lines
         self.font = font
         self.color = color
         self.lineHeight = lineHeight
-        self.showHint = showHint
+        self.hint = hint
+        self.bubble = bubble
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if bubble {
+            let card = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+            NSColor.windowBackgroundColor.withAlphaComponent(0.97).setFill()
+            card.fill()
+            NSColor.separatorColor.setStroke()
+            card.stroke()
+        }
         let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
         let textHeight = NSLayoutManager().defaultLineHeight(for: font)
         for (index, line) in lines.enumerated() {
             let y = CGFloat(index) * lineHeight + (lineHeight - textHeight) / 2
             (line.text as NSString).draw(at: NSPoint(x: line.x, y: y), withAttributes: attributes)
         }
-        guard showHint, let last = lines.last else { return }
+        guard let hint, let last = lines.last else { return }
 
         let hintFont = Self.hintFont(for: font)
         let hintAttributes: [NSAttributedString.Key: Any] = [.font: hintFont, .foregroundColor: color]
-        let hintText = "tab" as NSString
+        let hintText = hint as NSString
         let hintSize = hintText.size(withAttributes: hintAttributes)
         let lastIndex = CGFloat(lines.count - 1)
         let x = last.x + Self.measure(last.text, font: font) + Self.hintGap

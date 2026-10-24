@@ -35,6 +35,14 @@ final class LlamaEngine {
     struct GeneratedToken {
         var bytes: [UInt8]
         var probability: Float
+        /// Still finishing the word the user was in the middle of typing.
+        var finishesWord = false
+
+        /// Whether this piece starts a new word (space, newline or punctuation first).
+        var startsNewWord: Bool {
+            guard let first = bytes.first else { return false }
+            return first == 0x20 || first == 0x0A || first == 0x09 || (0x21...0x2F).contains(first) || (0x3A...0x40).contains(first)
+        }
     }
 
     private var model: OpaquePointer?
@@ -154,13 +162,15 @@ final class LlamaEngine {
     ///
     /// `stop` is called with the text generated so far after every token and
     /// returns true to end generation. Generation also stops at the first
-    /// token whose probability is below `minProbability`: past that point the
+    /// token whose probability is below `minProbability` (or, while still
+    /// finishing a half-typed word, below `wordMinProbability`): past that point the
     /// model is guessing. Returns nil if cancelled.
     func complete(
         prompt: String,
         maxTokens: Int,
         healLastToken: Bool,
         minProbability: Float = 0,
+        wordMinProbability: Float? = nil,
         shouldContinue: () -> Bool,
         stop: (String) -> Bool
     ) -> Output? {
@@ -188,6 +198,8 @@ final class LlamaEngine {
         var hitLimit = true
         var generated: [GeneratedToken] = []
         var stoppedForConfidence = false
+        // Mid-word (token healing), the first pieces finish the typed word.
+        var finishingWord = !healPrefix.isEmpty
 
         for step in 0..<maxTokens {
             guard shouldContinue() else { return nil }
@@ -220,8 +232,11 @@ final class LlamaEngine {
             if step == 0, !healPrefix.isEmpty {
                 piece.removeFirst(min(healPrefix.count, piece.count))
             }
-            generated.append(GeneratedToken(bytes: piece, probability: probability))
-            if probability < minProbability {
+            var token = GeneratedToken(bytes: piece, probability: probability)
+            if finishingWord, token.startsNewWord { finishingWord = false }
+            token.finishesWord = finishingWord
+            generated.append(token)
+            if probability < (finishingWord ? (wordMinProbability ?? minProbability) : minProbability) {
                 hitLimit = false
                 stoppedForConfidence = true
                 break

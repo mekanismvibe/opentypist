@@ -19,6 +19,9 @@ final class EngineService {
         var examples: [String] = []
         var length: CompletionLength
         var minProbability: Float = 0
+        var wordMinProbability: Float? = nil
+        /// Text after the caret on the same line, for mid-line suggestions.
+        var textAfter: String = ""
     }
 
     private let queue = DispatchQueue(label: "opentypist.engine", qos: .userInitiated)
@@ -38,11 +41,15 @@ final class EngineService {
     func load(path: String) {
         cancelAll()
         setState(.loading)
+        let started = Date()
         queue.async { [engine] in
             do {
                 try engine.load(path: path)
                 let name = engine.modelDescription
-                DispatchQueue.main.async { self.setState(.ready(name)) }
+                DispatchQueue.main.async {
+                    AppStatus.shared.lastModelLoadSeconds = Date().timeIntervalSince(started)
+                    self.setState(.ready(name))
+                }
             } catch {
                 DispatchQueue.main.async { self.setState(.failed(error.localizedDescription)) }
             }
@@ -96,11 +103,16 @@ final class EngineService {
                 maxTokens: request.length.maxTokens,
                 healLastToken: prompt.healLastToken,
                 minProbability: request.minProbability,
+                wordMinProbability: request.wordMinProbability,
                 shouldContinue: { self.isLatest(id) },
                 stop: { PromptBuilder.shouldStop($0, maxWords: maxWords) }
             ) else { return }
-            let confident = PromptBuilder.confidentText(output.tokens, hitTokenLimit: output.hitTokenLimit, minProbability: request.minProbability)
-            let text = PromptBuilder.clean(confident.text, prompt: prompt, maxWords: maxWords, hitTokenLimit: confident.hitTokenLimit)
+            let confident = PromptBuilder.confidentText(output.tokens, hitTokenLimit: output.hitTokenLimit,
+                                                        minProbability: request.minProbability, wordMinProbability: request.wordMinProbability)
+            var text = PromptBuilder.clean(confident.text, prompt: prompt, maxWords: maxWords, hitTokenLimit: confident.hitTokenLimit)
+            if let suggestion = text, !request.textAfter.isEmpty {
+                text = PromptBuilder.fitBefore(request.textAfter, suggestion: suggestion)
+            }
             DispatchQueue.main.async {
                 guard self.isLatest(id) else { return }
                 completion(text)

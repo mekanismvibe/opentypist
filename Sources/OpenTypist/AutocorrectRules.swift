@@ -12,6 +12,9 @@ struct AutocorrectRule {
     let immediate: Bool
     /// AHK `?`: may match the end of a longer word.
     let insideWords: Bool
+    /// Insert the replacement exactly as written (text replacements and
+    /// snippets), instead of matching the capitalization that was typed.
+    var exact = false
 }
 
 /// What to do when the user finishes typing some text.
@@ -167,7 +170,7 @@ final class AutocorrectRules {
             return .fix(replacement: rule.replacement, length: word.count)
         }
         if let rule = wordRules[lower] {
-            return .fix(replacement: Self.conformCase(typed: word, replacement: rule.replacement), length: word.count)
+            return .fix(replacement: replacement(for: rule, typed: word), length: word.count)
         }
         if let options = ambiguous[lower] {
             return .ambiguous(word: word, candidates: options.map { Self.conformCase(typed: word, replacement: $0) })
@@ -205,7 +208,7 @@ final class AutocorrectRules {
     }
 
     private func replacement(for rule: AutocorrectRule, typed: String) -> String {
-        rule.caseSensitive ? rule.replacement : Self.conformCase(typed: typed, replacement: rule.replacement)
+        rule.caseSensitive || rule.exact ? rule.replacement : Self.conformCase(typed: typed, replacement: rule.replacement)
     }
 
     static func lastWord(of typed: String) -> String {

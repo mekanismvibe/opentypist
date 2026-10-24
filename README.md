@@ -8,7 +8,10 @@ ghost text: the field's own font in a faded version of its text color.
 - **Tab** accepts the next word
 - **Shift-Tab** accepts the whole suggestion
 - **Esc** dismisses it (or just keep typing)
-- **Option-Tab** always sends a normal Tab
+
+Both accept keys can be changed (Settings → General → Keys), and apps where
+Tab already does something can get their own keys (Settings → Apps), for
+example → and ⌥→ in Slack.
 
 Everything runs locally with [llama.cpp](https://github.com/ggml-org/llama.cpp)
 on the GPU (Metal). Nothing you type leaves your Mac, password fields are never
@@ -99,9 +102,33 @@ Settings → Personal (or `opentypist://settings/personal`):
   password fields, card-like numbers and long codes are never kept. You can
   review and delete samples one by one.
 
-Everything personal (profile, learned counts, samples) is stored only on this
-Mac, AES-GCM encrypted, with the key in your login Keychain. Nothing is ever
-sent anywhere.
+Everything personal (profile, learned counts, samples, snippets) is stored
+only on this Mac, AES-GCM encrypted, and never sent anywhere. Builds signed
+with a Developer ID keep the key in the login Keychain. Ad-hoc builds keep it
+in a key file only your user account can read, because the Keychain trusts
+one exact ad-hoc binary and would ask again after every rebuild or update.
+Data saved by older builds is moved over once (macOS asks to allow access to
+the old Keychain item).
+
+## Text replacements
+
+Settings → Replacements: your macOS Text Replacements (System Settings →
+Keyboard → Text Replacements) and your own snippets ("@@" → your email,
+";addr" → your address) expand in every app, including browsers, Slack and
+Discord where macOS's own replacements don't work. Type the shortcut, then a
+space or punctuation. Line breaks in a snippet are typed as Shift-Return, so a
+chat app doesn't send the message halfway. Press Delete right after to undo.
+
+## Memory & battery
+
+Settings → General → Memory & battery (all off by default):
+
+- **Unload the model when I'm not typing** after 5 minutes to 2 hours. It frees
+  about 3 GB with Gemma 4 E2B and reloads on your next keystroke: about 0.5–0.8 s
+  while macOS still caches the file, a few seconds from a cold disk. Settings
+  shows how long the last load took.
+- **On battery** and **In Low Power Mode**: keep going, switch to a smaller
+  model (Qwen 3 1.7B by default), or pause suggestions.
 
 ## Permissions
 
@@ -149,7 +176,15 @@ Input Monitoring.
   E2B, "Balanced" shows a suggestion 74% of the time with 50% of suggested
   words right, against 91% / 26% with no filter; "Fewer, more accurate" shows
   ~55% of the time with ~73% right
-- Mid-word completion via token healing ("I'll be th" → "ere in about")
+- Mid-word completion via token healing ("I'm very in" → "terested in"), with
+  its own looser confidence bar: finishing a half-typed word is right about
+  87–92% of the time, so it shows even when the words after it don't (98.7% of
+  half-typed words get completed at "Fewer, more accurate", up from 87.4%)
+- Suggestions in the middle of a line, shown in a small card below the line
+  so they don't cover the text after the caret, and trimmed to lead into that
+  text instead of repeating it ("I'm very in| this job" → "terested in")
+- Stats: words accepted per day for the last 30 days, this week's total and
+  your best day
 - KV-cache reuse between keystrokes; around 150–200 ms per keystroke on an M5
 
 ## Install

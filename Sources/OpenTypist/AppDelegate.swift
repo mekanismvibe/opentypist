@@ -56,8 +56,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         models.$revision.dropFirst().sink { [weak self] _ in
-            DispatchQueue.main.async { self?.loadModel() }
+            DispatchQueue.main.async { self?.loadModel(force: true) }
         }.store(in: &cancellables)
+        // Power settings or situation changed: maybe switch model or pause.
+        let powerSettings = Publishers.Merge3(
+            settings.$batteryBehavior.dropFirst().map { _ in () },
+            settings.$lowPowerBehavior.dropFirst().map { _ in () },
+            settings.$smallerModelID.dropFirst().map { _ in () }
+        )
+        powerSettings.sink { [weak self] in DispatchQueue.main.async { self?.loadModel() } }.store(in: &cancellables)
+        settings.$unloadWhenIdle.dropFirst().sink { [weak self] enabled in
+            guard let self, !enabled, self.sleeping else { return }
+            self.sleeping = false
+            DispatchQueue.main.async { self.loadModel() }
+        }.store(in: &cancellables)
+        PowerMonitor.shared.onChange = { [weak self] in self?.loadModel() }
+        PowerMonitor.shared.start()
+        startIdleTimer()
         settings.$enabled.dropFirst().sink { [weak self] enabled in
             if !enabled { self?.controller.dismiss() }
             DispatchQueue.main.async { self?.updateIcon() }
@@ -78,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Order matters: accepting a suggestion wins over autocorrect, which
     /// wins over normal typing.
     private func handleKeyDown(_ event: CGEvent) -> Bool {
+        noteTyping()
         if controller.handleSuggestionKey(event) { return true }
         if autocorrector.handleKeyDown(event, app: NSWorkspace.shared.frontmostApplication) {
             return true
@@ -94,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 showOnboarding()
             } else if url.host == "settings" {
                 let tab = url.pathComponents.dropFirst().first ?? "general"
-                if ["general", "personal", "apps", "model", "stats"].contains(tab) { ViewState.shared.settingsTab = tab }
+                if ["general", "personal", "replacements", "apps", "model", "stats"].contains(tab) { ViewState.shared.settingsTab = tab }
                 showSettings()
             }
         }
@@ -133,12 +149,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateIcon()
     }
 
-    private func loadModel() {
-        guard let url = models.activeModelURL else {
+    // MARK: - Model lifecycle
+
+    /// The model file currently loaded (or loading).
+    private var loadedModelURL: URL?
+    /// Unloaded after a stretch without typing; reloads on the next keystroke.
+    private var sleeping = false
+    /// Paused by the battery / Low Power Mode setting.
+    private var powerPaused = false
+    private var lastTyping = Date()
+    private var idleTimer: Timer?
+
+    /// Loads the model that fits the current situation: the selected one,
+    /// the smaller one on battery or in Low Power Mode if so configured, or
+    /// none while paused or sleeping.
+    private func loadModel(force: Bool = false) {
+        let behavior = PowerMonitor.shared.behavior
+        powerPaused = behavior == .pause
+        if powerPaused {
             engine.unload()
+            loadedModelURL = nil
+            status.note("Suggestions paused \(PowerMonitor.shared.situation)")
+            updateIcon()
             return
         }
+        var url = models.activeModelURL
+        if behavior == .smallerModel {
+            if let small = ModelCatalog.model(id: settings.smallerModelID), models.isDownloaded(small) {
+                url = models.fileURL(for: small)
+            } else {
+                status.note("The smaller model isn't downloaded; using the usual one")
+            }
+        }
+        guard let url else {
+            engine.unload()
+            loadedModelURL = nil
+            return
+        }
+        if sleeping { return }
+        if !force, url == loadedModelURL, engine.state != .idle { return }
+        loadedModelURL = url
         engine.load(path: url.path)
+    }
+
+    private var loadedModelName: String {
+        guard let url = loadedModelURL else { return models.activeModelName ?? "model" }
+        return ModelCatalog.all.first { $0.fileName == url.lastPathComponent }?.name ?? url.deletingPathExtension().lastPathComponent
+    }
+
+    private func noteTyping() {
+        lastTyping = Date()
+        guard sleeping, !settings.isDisabled(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) else { return }
+        sleeping = false
+        status.note("Loading the model again")
+        loadModel()
+    }
+
+    private func startIdleTimer() {
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            guard let self, self.settings.unloadWhenIdle, !self.sleeping, self.engine.isReady,
+                  Date().timeIntervalSince(self.lastTyping) > Double(self.settings.idleUnloadMinutes * 60) else { return }
+            self.sleeping = true
+            self.engine.unload()
+            self.loadedModelURL = nil
+            self.status.note("Unloaded the model after \(self.settings.idleUnloadMinutes) minutes without typing")
+            self.updateIcon()
+        }
     }
 
     private func updateIcon() {
@@ -242,12 +318,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .none:
             break
         }
+        if powerPaused { return "Paused \(PowerMonitor.shared.situation) to save battery" }
+        if sleeping { return "Model unloaded to save memory; loads when you type" }
         switch engine.state {
         case .idle: return models.activeModelURL == nil ? "No model yet: choose one" : "Starting…"
-        case .loading: return "Loading \(models.activeModelName ?? "model")…"
+        case .loading: return "Loading \(loadedModelName)…"
         case .failed(let message): return "Model error: \(message)"
         case .ready:
-            return settings.enabled ? "Ready · \(models.activeModelName ?? "model")" : "Paused"
+            return settings.enabled ? "Ready · \(loadedModelName)" : "Paused"
         }
     }
 

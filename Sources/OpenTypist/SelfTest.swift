@@ -21,7 +21,15 @@ enum SelfTest {
             print("Load failed: \(error.localizedDescription)")
             exit(1)
         }
-        print("Loaded \(engine.modelDescription) in \(ms(since: start)) ms\n")
+        print("Loaded \(engine.modelDescription) in \(ms(since: start)) ms")
+        // What "unload when idle" costs: reloading while macOS still caches the file.
+        for attempt in 1...2 {
+            engine.unload()
+            start = Date()
+            try? engine.load(path: path)
+            print("Reload \(attempt): \(ms(since: start)) ms")
+        }
+        print("")
 
         let cases: [(String, String?, String?)] = [
             ("Hi Sarah, thanks for getting back to me so quickly. I'm running a few minutes late, so ", "Mail", "Re: Lunch tomorrow"),
@@ -119,6 +127,43 @@ enum SelfTest {
         precondition(PromptBuilder.confidentText([token("ing", 0.9), token(" late", 0.1)], hitTokenLimit: false, minProbability: 0.25).text == "ing")
         precondition(PromptBuilder.confidentText([token(" maybe", 0.1)], hitTokenLimit: false, minProbability: 0.25).text.isEmpty)
 
+        // Finishing a half-typed word uses its own, looser bar.
+        var finishing = [token("terested", 0.3), token(" in", 0.2), token(" the", 0.9)]
+        finishing[0].finishesWord = true
+        precondition(PromptBuilder.confidentText(finishing, hitTokenLimit: false, minProbability: 0.45).text.isEmpty)
+        precondition(PromptBuilder.confidentText(finishing, hitTokenLimit: false, minProbability: 0.45, wordMinProbability: 0.15).text == "terested")
+        precondition(PromptBuilder.confidentText(finishing, hitTokenLimit: false, minProbability: 0.15, wordMinProbability: 0.1).text == "terested in the")
+
+        // Mid-line: lead into the text after the caret, don't repeat it.
+        precondition(PromptBuilder.fitBefore(" this job.", suggestion: "terested in this job") == "terested in")
+        precondition(PromptBuilder.fitBefore(" tomorrow", suggestion: " see you tomorrow") == " see you")
+        precondition(PromptBuilder.fitBefore(", thanks", suggestion: " soon.") == " soon")
+        precondition(PromptBuilder.fitBefore(" the report", suggestion: " the report") == nil)
+        print("Mid-line fit: \"terested in this job\" before \" this job.\" → \(PromptBuilder.fitBefore(" this job.", suggestion: "terested in this job") ?? "nil")")
+
+        // Accept keys.
+        let tabDown = CGEvent(keyboardEventSource: nil, virtualKey: 48, keyDown: true)!
+        tabDown.flags = []
+        precondition(KeyCombo.tab.matches(tabDown) && !KeyCombo.shiftTab.matches(tabDown))
+        tabDown.flags = .maskShift
+        precondition(KeyCombo.shiftTab.matches(tabDown) && !KeyCombo.tab.matches(tabDown))
+        let arrow = CGEvent(keyboardEventSource: nil, virtualKey: 124, keyDown: true)!
+        arrow.flags = [.maskSecondaryFn, .maskNumericPad] // arrows carry these; they must not matter
+        precondition(KeyCombo.rightArrow.matches(arrow))
+        precondition(KeyCombo(keyCode: 0, character: "A").problem != nil && KeyCombo(keyCode: 49).problem != nil)
+        precondition(KeyCombo(keyCode: 0, control: true, character: "A").problem == nil && KeyCombo.rightArrow.problem == nil)
+        precondition(KeyCombo.tab.hintLabel == "tab" && KeyCombo.optionRightArrow.displayName == "⌥→")
+
+        // Text replacements insert exactly what was written.
+        let replacements = AutocorrectRules()
+        replacements.add(AutocorrectRule(trigger: "omw", replacement: "On my way!", caseSensitive: false, immediate: false, insideWords: false, exact: true))
+        replacements.add(AutocorrectRule(trigger: "@@", replacement: "me@example.com", caseSensitive: false, immediate: false, insideWords: false, exact: true))
+        replacements.add(AutocorrectRule(trigger: ";addr", replacement: "1 Main St\nSpringfield", caseSensitive: false, immediate: false, insideWords: false, exact: true))
+        precondition(replacements.matchAtEnd(of: "ok OMW") == .fix(replacement: "On my way!", length: 3))
+        precondition(replacements.matchAtEnd(of: "email: @@") == .fix(replacement: "me@example.com", length: 2))
+        precondition(replacements.matchAtEnd(of: "send to ;addr") == .fix(replacement: "1 Main St\nSpringfield", length: 5))
+        precondition(replacements.matchAtEnd(of: "x;addr") == nil)
+
         precondition(Updater.isNewer("0.10.0", than: "0.9.2") && Updater.isNewer("0.2.0", than: "0.1.0"))
         precondition(!Updater.isNewer("0.2.0", than: "0.2.0") && !Updater.isNewer("0.1.9", than: "0.2"))
 
@@ -156,8 +201,22 @@ enum SelfTest {
         WritingSamples.shared.record(WritingSample(date: Date(), bundleID: "com.apple.MobileSMS", appName: "Messages",
                                                    windowTitle: "Sam", text: "haha yeah that works for me, see you at 7 then! bring snacks"))
 
-        let view = NSHostingView(rootView: PersonalSettings().frame(width: 620, height: 1700))
-        view.frame = NSRect(x: 0, y: 0, width: 620, height: 1700)
+        // Any other tab: --snapshot-personal out.png --tab general|replacements|stats|apps
+        var tab = "personal"
+        if let t = arguments.firstIndex(of: "--tab"), t + 1 < arguments.count { tab = arguments[t + 1] }
+        TextReplacements.shared.add(shortcut: "@@", expansion: "alex@example.com")
+        TextReplacements.shared.add(shortcut: ";addr", expansion: "1 Main Street\nSpringfield")
+        var days: [String: Int] = [:]
+        for (offset, day) in Stats.shared.recentDays(30).enumerated() {
+            days[ISO8601DateFormatter.string(from: day.date, timeZone: .current, formatOptions: [.withFullDate])] = [0, 40, 85, 120, 60, 0, 30][offset % 7] + offset * 3
+        }
+        Stats.shared.setDailyWordsForPreview(days)
+        Settings.shared.appAcceptKeys = ["com.tinyspeck.slackmacgap": AcceptKeys(word: .rightArrow, all: .optionRightArrow)]
+        ViewState.shared.settingsTab = tab
+        let height: CGFloat = tab == "personal" ? 1700 : 1500
+        let root: AnyView = tab == "personal" ? AnyView(PersonalSettings()) : AnyView(SettingsView(height: height))
+        let view = NSHostingView(rootView: root.frame(width: 620, height: height))
+        view.frame = NSRect(x: 0, y: 0, width: 620, height: height)
         let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = view
@@ -238,6 +297,42 @@ enum SelfTest {
             let precision = shown[t] > 0 ? Double(firstRight[t]) / Double(shown[t]) * 100 : 0
             let wordPrecision = wordsShown[t] > 0 ? Double(wordsRight[t]) / Double(wordsShown[t]) * 100 : 0
             print(String(format: "  %.2f     %5.1f%%   %5.1f%%             %5.1f%%", threshold, coverage, precision, wordPrecision))
+        }
+
+        // Finishing a half-typed word: 1–3 letters into longer words, scored
+        // on whether the completed word shows up and is the right word.
+        var wordCases: [(prompt: PromptBuilder.Prompt, truth: String, output: LlamaEngine.Output)] = []
+        for (app, text) in corpus {
+            let allWords = text.split(separator: " ").map(String.init)
+            for i in 2..<allWords.count {
+                let target = allWords[i].trimmingCharacters(in: .punctuationCharacters).lowercased()
+                for typedCount in 1...3 where target.count >= typedCount + 3 && target.allSatisfy(\.isLetter) {
+                    let before = allWords[..<i].joined(separator: " ") + " " + String(allWords[i].prefix(typedCount))
+                    let prompt = PromptBuilder.build(textBefore: before, appName: app, windowTitle: nil)
+                    guard prompt.healLastToken, let output = engine.complete(
+                        prompt: prompt.text, maxTokens: 20, healLastToken: true,
+                        shouldContinue: { true }, stop: { PromptBuilder.shouldStop($0, maxWords: 7) }) else { continue }
+                    wordCases.append((prompt, String(target.dropFirst(typedCount)), output))
+                }
+            }
+        }
+        print("\nFinishing the current word (\(wordCases.count) half-typed words)")
+        print("level      word threshold  completion shown  right word")
+        for level in ConfidenceLevel.allCases {
+            for wordThreshold: Float in [level.minProbability, 0.15, 0.1, 0.06, 0.04, 0.02] where wordThreshold <= level.minProbability {
+                var shownWords = 0, rightWords = 0
+                for item in wordCases {
+                    let confident = PromptBuilder.confidentText(item.output.tokens, hitTokenLimit: item.output.hitTokenLimit,
+                                                                minProbability: level.minProbability, wordMinProbability: wordThreshold)
+                    guard let suggestion = PromptBuilder.clean(confident.text, prompt: item.prompt, maxWords: 7, hitTokenLimit: confident.hitTokenLimit),
+                          let completion = words(suggestion).first else { continue }
+                    shownWords += 1
+                    if completion == item.truth { rightWords += 1 }
+                }
+                print(String(format: "%-10@ %.2f            %5.1f%%            %5.1f%%", level.rawValue as NSString, wordThreshold,
+                             Double(shownWords) / Double(wordCases.count) * 100,
+                             shownWords > 0 ? Double(rightWords) / Double(shownWords) * 100 : 0))
+            }
         }
         engine.unload()
         exit(0)
@@ -360,6 +455,12 @@ enum SelfTest {
         let raw = (try? Data(contentsOf: directory.appendingPathComponent("profile.bin"))) ?? Data()
         precondition(!String(decoding: raw, as: UTF8.self).contains("Proxmox"), "profile must be encrypted")
         print("  encrypted round-trip OK (\(raw.count) bytes on disk)")
+
+        // Data saved under another key is set aside, never overwritten.
+        let otherKeyStore = SecureStore(directory: directory, key: SymmetricKey(size: .bits256))
+        precondition(otherKeyStore.load(ProfileState.self, from: "profile.bin") == nil)
+        precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("profile.bin.unreadable").path))
+        precondition(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("profile.bin").path))
 
         // A long unbroken token stands in for an API key (a realistic-looking
         // fake key would trip secret scanners).

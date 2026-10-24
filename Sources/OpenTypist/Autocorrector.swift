@@ -199,6 +199,13 @@ final class Autocorrector {
 
     /// Returns true if the ending key was swallowed and replayed after a fix.
     private func wordEnded(with ending: Character, event: CGEvent) -> Bool {
+        // Text replacements and snippets come first.
+        if case .fix(let replacement, let length)? = TextReplacements.shared.match(typed) {
+            applyFix(length: length, replacement: replacement, ending: ending, event: event)
+            status.note("Expanded a text replacement")
+            return true
+        }
+
         let word = AutocorrectRules.lastWord(of: typed)
         guard !word.isEmpty, !personal.isNeverCorrect(word) else { return false }
 
@@ -213,12 +220,7 @@ final class Autocorrector {
                 startModelCheck(word: word, candidates: [replacement], margin: Margin.realWord, ending: ending)
                 return false
             }
-            TextInserter.deleteBackward(length)
-            TextInserter.type(replacement)
-            TextInserter.repost(event)
-            replaceTypedSuffix(length, with: replacement)
-            append(String(ending))
-            lastFix = (trigger, replacement, String(ending))
+            applyFix(length: length, replacement: replacement, ending: ending, event: event)
             recordFix()
             return true
         case .ambiguous(let word, let candidates):
@@ -231,6 +233,19 @@ final class Autocorrector {
             }
         }
         return false
+    }
+
+    /// Replaces the last `length` typed characters, then replays the ending
+    /// key that was swallowed. Delete right afterwards undoes it.
+    private func applyFix(length: Int, replacement: String, ending: Character, event: CGEvent) {
+        let trigger = String(typed.suffix(length))
+        TextInserter.deleteBackward(length)
+        TextInserter.type(replacement)
+        TextInserter.repost(event)
+        replaceTypedSuffix(length, with: replacement)
+        append(String(ending))
+        lastFix = (trigger, replacement, String(ending))
+        onTextChanged?()
     }
 
     private func undo(_ fix: (original: String, replacement: String, ending: String)) {
