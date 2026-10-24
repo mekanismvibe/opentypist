@@ -16,7 +16,9 @@ param(
     [ValidateSet('notepad', 'edge')] [string]$Target = 'notepad',
     [string]$Exe = (Join-Path $PSScriptRoot '..\..\build\windows\OpenTypist\OpenTypist.exe'),
     [string]$Out = (Join-Path $env:TEMP 'opentypist-typing-test'),
-    [int]$KeyDelay = 70
+    [int]$KeyDelay = 70,
+    # Ctrl+Plus presses before typing (Edge: 110%, 125%, 150%, ...).
+    [int]$ZoomSteps = 0
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -178,6 +180,7 @@ if (-not $window) { throw "No window titled *$title* appeared" }
 [TypingTest]::SetForegroundWindow($window.MainWindowHandle) | Out-Null
 Start-Sleep -Milliseconds 1500
 [TypingTest]::Window = [TypingTest]::GetForegroundWindow()
+for ($i = 0; $i -lt $ZoomSteps; $i++) { [TypingTest]::PressCtrl(0xBB); Start-Sleep -Milliseconds 300 }
 $since = (Get-Date).ToString('HH:mm:ss.fff')
 
 $steps = @(
