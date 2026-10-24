@@ -1,0 +1,7 @@
+module CLlama [system] {
+    header "shim.h"
+    link "llama"
+    link "ggml"
+    link "ggml-base"
+    export *
+}

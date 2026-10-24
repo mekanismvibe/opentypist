@@ -1,0 +1,6 @@
+.build/
+build/
+*.gguf
+*.gguf.partial
+.DS_Store
+.swiftpm/
