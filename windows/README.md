@@ -78,9 +78,10 @@ Intel i7-11700F, 32 GB RAM, NVIDIA RTX 3060 12 GB, Windows 11, Vulkan backend.
 | Per keystroke, Balanced filter: median / p90 | 26 / 43 ms | 43 / 73 ms | 162 / 285 ms |
 | Model load (warm file cache) | 2.4 s | 3.2 s | 2.1 s |
 
-In the running app (E2B), a suggestion appears a median 32 ms (p90 58 ms)
-after the 60 ms pause that follows each keystroke; reading the field through
-UI Automation takes 4 ms in Notepad and 7 ms in Edge.
+In the running app, a suggestion appears a median 32 ms (p90 58 ms) with E2B
+and 52 ms (max 96 ms) with E4B after the 60 ms pause that follows each
+keystroke; reading the field through UI Automation takes 4 ms in Notepad and
+7 ms in Edge.
 
 The first start of a new build on a PC takes 20–35 s longer: the Vulkan
 driver compiles its GPU pipelines once (then caches them), which the app does
