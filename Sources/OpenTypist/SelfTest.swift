@@ -272,7 +272,9 @@ enum SelfTest {
                 let staged = try await Updater.shared.prepare(release)
                 print("Downloaded, checksum verified, app verified: \(staged.path)")
                 try Updater.shared.replace(appAt: target, with: staged)
-                let after = Bundle(url: target)?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+                // Bundle caches Info.plist per path, so read the new file directly.
+                let plist = NSDictionary(contentsOf: target.appendingPathComponent("Contents/Info.plist"))
+                let after = plist?["CFBundleShortVersionString"] as? String ?? "?"
                 print("Replaced \(target.path): \(before) → \(after)")
             } catch {
                 print("Update test failed: \(error.localizedDescription)")
