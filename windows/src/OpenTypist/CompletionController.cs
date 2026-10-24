@@ -272,7 +272,8 @@ public sealed class CompletionController
         visible = new Visible(text, keys);
         overlay.ShowSuggestion(text, caret, ctx.Style, keys.Word.HintLabel);
         AppStatus.Log($"overlay: {text.Length} chars at caret ({caret.X:0},{caret.Y:0} h {caret.Height:0}), " +
-                      $"font {ctx.Style.FontFamily ?? "?"} {ctx.Style.FontSizePx?.ToString("0.0") ?? "?"} px reported, {overlay.LastFontSizePx:0.0} px drawn");
+                      $"font {ctx.Style.FontFamily ?? "?"} {ctx.Style.FontSizePx?.ToString("0.0") ?? "?"} px reported, {overlay.LastFontSizePx:0.0} px drawn " +
+                      $"(zoom sample {ctx.Style.Sample?.Length ?? 0} chars, {ctx.Style.SampleWidthPx?.ToString("0") ?? "?"} px)");
     }
 
     private void HideOverlay()

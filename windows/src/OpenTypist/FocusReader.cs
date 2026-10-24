@@ -10,10 +10,10 @@ namespace OpenTypist;
 
 /// Font and color of the text just before the caret, so the ghost text can
 /// match what the user is typing. The size is in physical pixels as UI
-/// Automation reports it (without the app's zoom); the character before the
-/// caret and its on-screen width tell the overlay the zoom.
+/// Automation reports it (without the app's zoom); a sample of the text
+/// before the caret and its on-screen width tell the overlay the zoom.
 public sealed record TextStyle(string? FontFamily = null, double? FontSizePx = null, Color? Color = null,
-                               char? PreviousCharacter = null, double? PreviousCharacterWidthPx = null);
+                               string? Sample = null, double? SampleWidthPx = null);
 
 /// What the user is typing into right now, read through UI Automation.
 public sealed record FocusContext(
@@ -178,7 +178,11 @@ public sealed class FocusReader : IDisposable
         var frame = ElementFrame(element);
         var previousRect = before.Length > 0 && !previousIsNewline ? LastRect(previousCharacter) : null;
         var caretRect = CaretRect(caret, previousRect, threadId);
-        var style = previousRect is Rect p ? Style(previousCharacter, before[^1], p) : new TextStyle();
+        var style = previousRect is Rect p ? Style(previousCharacter, p) : new TextStyle();
+        if (style.FontSizePx is not null && ZoomSample(caret, before) is (string sample, double width))
+        {
+            style = style with { Sample = sample, SampleWidthPx = width };
+        }
         bool singleLine = controlType is UIA_EditControlTypeId or UIA_ComboBoxControlTypeId && !IsMultiLine(element);
 
         return new FocusResult(new FocusContext(pid, app.Id, app.Name, windowTitle, role, before, after, caretRect, style, frame, singleLine), null);
@@ -265,7 +269,26 @@ public sealed class FocusReader : IDisposable
         return null;
     }
 
-    private static TextStyle Style(IUIAutomationTextRange previousCharacter, char character, Rect bounds)
+    /// Up to 16 characters before the caret on its line (without trailing
+    /// spaces, which some apps give no width) and their on-screen width. One
+    /// character alone is too coarse: browsers round each box to pixels.
+    private static (string Sample, double Width)? ZoomSample(IUIAutomationTextRange caret, string before)
+    {
+        var line = before[(before.LastIndexOf('\n') + 1)..];
+        var trimmed = line.TrimEnd(' ');
+        int trailing = line.Length - trimmed.Length;
+        var sample = TextUtil.Suffix(trimmed, 16);
+        if (sample.Length < 3 || sample.Contains('\t')) return null;
+        // Start first: moving the end of a collapsed range back drags the start along.
+        var range = caret.Clone();
+        range.MoveEndpointByUnit(TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start, TextUnit.TextUnit_Character, -(trailing + sample.Length));
+        if (trailing > 0) range.MoveEndpointByUnit(TextPatternRangeEndpoint.TextPatternRangeEndpoint_End, TextUnit.TextUnit_Character, -trailing);
+        // One rectangle: the sample is on one visual line.
+        if (range.GetBoundingRectangles() is not double[] values || values.Length != 4 || values[2] < 4) return null;
+        return (sample, values[2]);
+    }
+
+    private static TextStyle Style(IUIAutomationTextRange previousCharacter, Rect bounds)
     {
         string? family = null;
         double? sizePx = null;
@@ -283,7 +306,7 @@ public sealed class FocusReader : IDisposable
             }
         }
         catch (COMException) { }
-        return new TextStyle(family, sizePx, color, character, bounds.Width);
+        return new TextStyle(family, sizePx, color);
     }
 
     /// "Notepad", "Microsoft Edge": the file description, which some apps

@@ -64,19 +64,24 @@ public sealed class OverlayWindow : Window
     /// The field's font size on screen, in physical pixels. UI Automation
     /// reports the size without the app's zoom (Notepad, browsers), and the
     /// character box can be taller than the text (line spacing), so the zoom
-    /// comes from the on-screen width of the character before the caret.
+    /// comes from the on-screen width of the text before the caret.
     public static double FontSizePx(TextStyle style, Typeface typeface, Rect caret, double scale)
     {
         if (style.FontSizePx is double px)
         {
-            if (style.PreviousCharacter is char c && !char.IsSurrogate(c) && !char.IsControl(c)
-                && style.PreviousCharacterWidthPx is double width && width >= 2)
+            if (style.Sample is { Length: > 0 } sample && style.SampleWidthPx is double width)
             {
-                double advance = GhostTextView.Format(c.ToString(), typeface, px, Colors.Black, 1).WidthIncludingTrailingWhitespace;
-                if (advance >= 2)
+                var formatted = GhostTextView.Format(sample, typeface, px, Colors.Black, 1);
+                if (formatted.Width >= 4)
                 {
-                    double zoom = Math.Clamp(width / advance, 0.25, 5);
-                    return Math.Abs(zoom - 1) < 0.1 ? px : px * zoom;
+                    double zoom = Math.Clamp(width / formatted.Width, 0.25, 5);
+                    // Right after inserting text, browsers can report boxes
+                    // from a layout that is still updating. When the caret
+                    // is exactly one unzoomed line tall, a small difference
+                    // is that, not zoom.
+                    double heightZoom = caret.Height / formatted.Height;
+                    if (Math.Abs(zoom - 1) < 0.08 || (Math.Abs(heightZoom - 1) < 0.07 && Math.Abs(zoom - 1) < 0.25)) return px;
+                    return px * zoom;
                 }
             }
             if (px <= caret.Height * 1.05) return px;
