@@ -75,6 +75,35 @@ extension CGEvent {
 enum TextInserter {
     static let marker: Int64 = 0x0F7E_7157
 
+    /// Presses Delete (backspace) `count` times.
+    static func deleteBackward(_ count: Int) {
+        guard count > 0 else { return }
+        let source = CGEventSource(stateID: .privateState)
+        for _ in 0..<count {
+            for keyDown in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: keyDown) else { continue }
+                event.flags = []
+                event.setIntegerValueField(.eventSourceUserData, value: marker)
+                event.post(tap: .cghidEventTap)
+            }
+        }
+    }
+
+    /// Replays a key the tap swallowed, after our own edits. Built from our
+    /// own event source: a copy of the original keeps its source, which
+    /// overwrites our marker when posted, so the tap would see it again.
+    static func repost(_ event: CGEvent) {
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        guard let replay = CGEvent(keyboardEventSource: CGEventSource(stateID: .privateState), virtualKey: keyCode, keyDown: true) else { return }
+        var length = 0
+        var buffer = [UniChar](repeating: 0, count: 8)
+        event.keyboardGetUnicodeString(maxStringLength: buffer.count, actualStringLength: &length, unicodeString: &buffer)
+        replay.keyboardSetUnicodeString(stringLength: length, unicodeString: buffer)
+        replay.flags = event.flags
+        replay.setIntegerValueField(.eventSourceUserData, value: marker)
+        replay.post(tap: .cghidEventTap)
+    }
+
     static func type(_ text: String) {
         let source = CGEventSource(stateID: .privateState)
         let units = Array(text.utf16)

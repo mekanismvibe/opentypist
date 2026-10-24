@@ -57,7 +57,13 @@ final class Settings: ObservableObject {
     /// Read visible window text (needs Screen Recording) and add it to the prompt.
     @Published var useScreenContext: Bool { didSet { defaults.set(useScreenContext, forKey: "useScreenContext") } }
     @Published var selectedModelID: String { didSet { defaults.set(selectedModelID, forKey: "selectedModelID") } }
+    /// Fix known misspellings from the lists as soon as a word ends.
+    @Published var autocorrectEnabled: Bool { didSet { defaults.set(autocorrectEnabled, forKey: "autocorrectEnabled") } }
+    /// Let the language model settle typos the lists can't.
+    @Published var aiTypoFix: Bool { didSet { defaults.set(aiTypoFix, forKey: "aiTypoFix") } }
+    /// Add a space after an accepted word or a finished suggestion.
     @Published var acceptTrailingSpace: Bool { didSet { defaults.set(acceptTrailingSpace, forKey: "acceptTrailingSpace") } }
+    @Published var showMenuBarIcon: Bool { didSet { defaults.set(showMenuBarIcon, forKey: "showMenuBarIcon") } }
     @Published var disabledApps: [String] { didSet { defaults.set(disabledApps, forKey: "disabledApps") } }
     /// A user-chosen .gguf; nil means the downloaded default model.
     @Published var customModelPath: String? { didSet { defaults.set(customModelPath, forKey: "customModelPath") } }
@@ -70,8 +76,14 @@ final class Settings: ObservableObject {
             "useScreenContext": true,
             "selectedModelID": ModelCatalog.recommended().id,
             "acceptTrailingSpace": true,
+            "autocorrectEnabled": true,
+            "aiTypoFix": true,
+            "showMenuBarIcon": true,
             "disabledApps": Self.defaultDisabledApps,
         ])
+        showMenuBarIcon = defaults.bool(forKey: "showMenuBarIcon")
+        autocorrectEnabled = defaults.bool(forKey: "autocorrectEnabled")
+        aiTypoFix = defaults.bool(forKey: "aiTypoFix")
         enabled = defaults.bool(forKey: "enabled")
         length = CompletionLength(rawValue: defaults.string(forKey: "length") ?? "") ?? .medium
         useAppContext = defaults.bool(forKey: "useAppContext")
@@ -106,9 +118,11 @@ final class Stats: ObservableObject {
     @Published private(set) var acceptKeyPresses: Int
     @Published private(set) var suggestionsShown: Int
     @Published private(set) var wordsToday: Int
+    @Published private(set) var correctionsMade: Int
     private var day: String
 
     private init() {
+        correctionsMade = defaults.integer(forKey: "stats.corrections")
         wordsAccepted = defaults.integer(forKey: "stats.words")
         charactersInserted = defaults.integer(forKey: "stats.chars")
         acceptKeyPresses = defaults.integer(forKey: "stats.presses")
@@ -137,7 +151,13 @@ final class Stats: ObservableObject {
         save()
     }
 
+    func recordCorrection() {
+        correctionsMade += 1
+        save()
+    }
+
     func reset() {
+        correctionsMade = 0
         wordsAccepted = 0
         charactersInserted = 0
         acceptKeyPresses = 0
@@ -160,6 +180,7 @@ final class Stats: ObservableObject {
         defaults.set(acceptKeyPresses, forKey: "stats.presses")
         defaults.set(suggestionsShown, forKey: "stats.shown")
         defaults.set(wordsToday, forKey: "stats.wordsToday")
+        defaults.set(correctionsMade, forKey: "stats.corrections")
         defaults.set(day, forKey: "stats.day")
     }
 

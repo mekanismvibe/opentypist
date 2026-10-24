@@ -170,35 +170,7 @@ final class LlamaEngine {
         if tokens.count > limit {
             tokens = [tokens[0]] + tokens.suffix(limit - 1)
         }
-
-        // Reuse the cached prefix; at least one token must be decoded to get logits.
-        var common = 0
-        while common < min(cached.count, tokens.count), cached[common] == tokens[common] { common += 1 }
-        if common == tokens.count { common -= 1 }
-
-        let memory = llama_get_memory(ctx)
-        if !llama_memory_seq_rm(memory, 0, llama_pos(common), -1) {
-            llama_memory_clear(memory, true)
-            common = 0
-        }
-        cached = Array(tokens.prefix(common))
-
-        var index = common
-        while index < tokens.count {
-            guard shouldContinue() else { return nil }
-            let count = min(512, tokens.count - index)
-            var chunk = Array(tokens[index..<(index + count)])
-            let rc = chunk.withUnsafeMutableBufferPointer {
-                llama_decode(ctx, llama_batch_get_one($0.baseAddress, Int32(count)))
-            }
-            if rc != 0 {
-                llama_memory_clear(memory, true)
-                cached = []
-                return nil
-            }
-            cached.append(contentsOf: chunk)
-            index += count
-        }
+        guard evaluate(tokens, shouldContinue: shouldContinue) else { return nil }
 
         var bytes: [UInt8] = []
         var text = ""
@@ -245,6 +217,113 @@ final class LlamaEngine {
         }
 
         return Output(text: text, hitTokenLimit: hitLimit)
+    }
+
+    /// Brings the KV cache to exactly `tokens`, reusing the longest cached
+    /// prefix, so the logits for the last token are available.
+    private func evaluate(_ tokens: [llama_token], shouldContinue: () -> Bool) -> Bool {
+        guard let ctx, !tokens.isEmpty else { return false }
+        // At least one token must be decoded to get logits.
+        var common = 0
+        while common < min(cached.count, tokens.count), cached[common] == tokens[common] { common += 1 }
+        if common == tokens.count { common -= 1 }
+
+        let memory = llama_get_memory(ctx)
+        if !llama_memory_seq_rm(memory, 0, llama_pos(common), -1) {
+            llama_memory_clear(memory, true)
+            common = 0
+        }
+        cached = Array(tokens.prefix(common))
+
+        var index = common
+        while index < tokens.count {
+            guard shouldContinue() else { return false }
+            let count = min(512, tokens.count - index)
+            var chunk = Array(tokens[index..<(index + count)])
+            let rc = chunk.withUnsafeMutableBufferPointer {
+                llama_decode(ctx, llama_batch_get_one($0.baseAddress, Int32(count)))
+            }
+            if rc != 0 {
+                llama_memory_clear(memory, true)
+                cached = []
+                return false
+            }
+            cached.append(contentsOf: chunk)
+            index += count
+        }
+        return true
+    }
+
+    // MARK: - Scoring
+
+    /// Log-probability of each continuation following `prompt`, e.g. how
+    /// likely " the" vs " teh" is after "I saw". Used to pick spelling fixes.
+    func score(prompt: String, continuations: [String]) -> [Double]? {
+        guard let ctx, vocab != nil else { return nil }
+        var base = tokenize(prompt, addBOS: true)
+        let limit = Int(contextSize) - 32
+        if base.count > limit { base = [base[0]] + base.suffix(limit - 1) }
+        guard evaluate(base, shouldContinue: { true }), let last = llama_get_logits_ith(ctx, -1) else { return nil }
+
+        // The next decode overwrites the logits, so keep the prompt's.
+        let baseLogits = Array(UnsafeBufferPointer(start: last, count: nVocab))
+        let baseNorm = baseLogits.withUnsafeBufferPointer { logSumExp($0.baseAddress!) }
+        let memory = llama_get_memory(ctx)
+
+        var results: [Double] = []
+        for text in continuations {
+            let tokens = tokenize(text, addBOS: false)
+            guard let first = tokens.first else { results.append(-.infinity); continue }
+            var logProb = Double(baseLogits[Int(first)] - baseNorm)
+
+            if tokens.count > 1 {
+                // Decode all but the last token in one batch, with logits at every position.
+                let n = tokens.count - 1
+                var batch = llama_batch_init(Int32(n), 0, 1)
+                for i in 0..<n {
+                    batch.token[i] = tokens[i]
+                    batch.pos[i] = llama_pos(base.count + i)
+                    batch.n_seq_id[i] = 1
+                    batch.seq_id[i]![0] = 0
+                    batch.logits[i] = 1
+                }
+                batch.n_tokens = Int32(n)
+                let rc = llama_decode(ctx, batch)
+                llama_batch_free(batch)
+                if rc != 0 {
+                    llama_memory_clear(memory, true)
+                    cached = []
+                    return nil
+                }
+                for i in 0..<n {
+                    guard let logits = llama_get_logits_ith(ctx, Int32(i)) else { return nil }
+                    logProb += Double(logits[Int(tokens[i + 1])] - logSumExp(logits))
+                }
+                // Roll the cache back to the prompt.
+                _ = llama_memory_seq_rm(memory, 0, llama_pos(base.count), -1)
+            }
+            results.append(logProb)
+        }
+        cached = base
+        return results
+    }
+
+    private var expScratch: [Float] = []
+
+    private func logSumExp(_ logits: UnsafePointer<Float>) -> Float {
+        let n = vDSP_Length(nVocab)
+        if expScratch.count != nVocab { expScratch = [Float](repeating: 0, count: nVocab) }
+        var maxValue: Float = 0
+        vDSP_maxv(logits, 1, &maxValue, n)
+        var shift = -maxValue
+        var count = Int32(nVocab)
+        var sum: Float = 0
+        expScratch.withUnsafeMutableBufferPointer { buffer in
+            vDSP_vsadd(logits, 1, &shift, buffer.baseAddress!, 1, n)
+            vvexpf(buffer.baseAddress!, buffer.baseAddress!, &count)
+            vDSP_sve(buffer.baseAddress!, 1, &sum, n)
+        }
+        return maxValue + log(sum)
     }
 
     private func bestToken(startingWith prefix: [UInt8], logits: UnsafeMutablePointer<Float>) -> llama_token? {

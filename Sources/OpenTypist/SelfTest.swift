@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// `OpenTypist --selftest [--model path.gguf]` runs the engine on sample text
 /// without any UI or permissions, printing suggestions and latency.
@@ -84,6 +84,14 @@ enum SelfTest {
             print("  \(memory) GB → \(ModelCatalog.recommended(for: fake).name)")
         }
 
+        autocorrectChecks(engine: engine, arguments: arguments)
+
+        let font = NSFont.systemFont(ofSize: 13)
+        let wrapped = OverlayWindow.wrap("I'll be there in about 10 minutes.", font: font, firstWidth: 70, otherWidth: 120)
+        print("\nWrap (70pt, then 120pt lines): \(wrapped)")
+        precondition(wrapped.count > 1 && wrapped.dropFirst().allSatisfy { $0.first?.isWhitespace != true })
+        print("Wrap with no room after the caret: \(OverlayWindow.wrap(" be there soon", font: font, firstWidth: 5, otherWidth: 300))")
+
         // Suggestion bookkeeping.
         let s = Suggestion(textBefore: "so ", text: "I'll be there soon", pid: 1)
         precondition(Suggestion.nextWord(of: s.text, includeTrailingSpace: true) == "I'll ")
@@ -94,6 +102,45 @@ enum SelfTest {
         // ggml's Metal backend asserts if the process exits with a model loaded.
         engine.unload()
         exit(0)
+    }
+
+    /// List matching (optionally with `--ahk file.ahk`) and model choices.
+    private static func autocorrectChecks(engine: LlamaEngine, arguments: [String]) {
+        print("\n== Autocorrect lists")
+        let rules = AutocorrectRules()
+        if let url = Autocorrector.builtInListURL { print("built-in: \(rules.load(fileAt: url)) entries") }
+        if let i = arguments.firstIndex(of: "--ahk"), i + 1 < arguments.count {
+            print("ahk: \(rules.load(fileAt: URL(fileURLWithPath: arguments[i + 1]))) hotstrings")
+        }
+        let cases = ["I think teh", "Teh", "TEH", "becuase", "I recieved", "it was definately", "achive",
+                     "We need to redesign", "a foriegn", "I am designign", "he doe snot", "it was dispell"]
+        for text in cases {
+            let match = rules.matchAtEnd(of: text) ?? rules.matchImmediate(text)
+            print("  \(text.debugDescription) → \(String(describing: match))")
+        }
+        print("  conformCase: \(AutocorrectRules.conformCase(typed: "Teh", replacement: "the")), edit(teh, the) = \(SpellCheck.editDistance("teh", "the"))")
+        print("  spell languages: \(SpellCheck.languages); 'loosing' valid: \(SpellCheck.isValidWord("loosing")); 'stoer' guesses: \(SpellCheck.guesses(for: "stoer"))")
+
+        print("\n== Model picks (log-probabilities; first entry is what was typed)")
+        let picks: [(String, [String])] = [
+            ("I worked hard all year to", ["achive", "achieve", "archive"]),
+            ("Please remember to", ["achive", "achieve", "archive"]),
+            ("I keep", ["loosing", "losing"]),
+            ("The knot kept", ["loosing", "losing"]),
+            ("I need to go to the", ["stoer", "store", "stoner"]),
+            ("My friend", ["Jaxon", "Jason", "Saxon"]),
+            ("Can you send me the", ["recipt", "receipt", "recipe"]),
+        ]
+        for (context, candidates) in picks {
+            let start = Date()
+            let prompt = PromptBuilder.scoringPrompt(context: context + " ", appName: "Messages", windowTitle: nil, screenText: nil)
+            let scores = engine.score(prompt: prompt.text, continuations: candidates.map { prompt.wordPrefix + $0 }) ?? []
+            let shown = zip(candidates, scores).enumerated().map { index, pair in
+                let cost = index == 0 ? 0 : 2.0 * SpellCheck.typoCost(typed: candidates[0], intended: pair.0)
+                return "\(pair.0) \(String(format: "%.1f", pair.1))→\(String(format: "%.1f", pair.1 - cost))"
+            }.joined(separator: ", ")
+            print("[\(ms(since: start)) ms] \(context.debugDescription) → \(shown)")
+        }
     }
 
     private static func suggest(_ engine: LlamaEngine, text: String, app: String?, title: String?, length: CompletionLength) -> String? {

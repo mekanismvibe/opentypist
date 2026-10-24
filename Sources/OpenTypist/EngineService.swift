@@ -101,6 +101,32 @@ final class EngineService {
         }
     }
 
+    struct ScoreRequest {
+        var context: String
+        var appName: String?
+        var windowTitle: String?
+        var screenText: String?
+        var candidates: [String]
+    }
+
+    /// Log-probability of each candidate word following the context, on the
+    /// main thread (nil if the model isn't available). Not cancelled by typing.
+    func score(_ request: ScoreRequest, completion: @escaping ([Double]?) -> Void) {
+        queue.async { [engine] in
+            var result: [Double]?
+            if engine.isLoaded {
+                let prompt = PromptBuilder.scoringPrompt(
+                    context: request.context,
+                    appName: request.appName,
+                    windowTitle: request.windowTitle,
+                    screenText: request.screenText
+                )
+                result = engine.score(prompt: prompt.text, continuations: request.candidates.map { prompt.wordPrefix + $0 })
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     private func setState(_ newState: State) {
         state = newState
         onStateChange?(newState)

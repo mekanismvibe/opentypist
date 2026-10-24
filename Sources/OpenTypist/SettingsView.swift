@@ -30,7 +30,18 @@ private struct GeneralSettings: View {
                 }
                 Toggle("Use app name and window title as context", isOn: $settings.useAppContext)
                 Toggle("Use text visible on screen as context", isOn: $settings.useScreenContext)
-                Toggle("Add a space after an accepted word", isOn: $settings.acceptTrailingSpace)
+                Toggle("Add a space after accepting a suggestion", isOn: $settings.acceptTrailingSpace)
+            }
+            Section("App") {
+                LaunchAtLoginToggle()
+                Toggle("Show menu bar icon", isOn: $settings.showMenuBarIcon)
+                if !settings.showMenuBarIcon {
+                    Text("To get back to Settings, open OpenTypist again from Applications or Spotlight.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            Section("Autocorrect") {
+                AutocorrectSettings()
             }
             Section("Keys") {
                 LabeledContent("Accept next word", value: "Tab")
@@ -48,6 +59,45 @@ private struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct AutocorrectSettings: View {
+    @ObservedObject private var settings = Settings.shared
+    @ObservedObject private var state = ViewState.shared
+
+    var body: some View {
+        // Read so the view refreshes after an import.
+        let _ = state.autocorrectListsVersion
+        let autocorrector = AppStatus.shared.autocorrector
+        Toggle("Fix common misspellings as you type", isOn: $settings.autocorrectEnabled)
+        Toggle("Let the AI model fix other typos", isOn: $settings.aiTypoFix)
+        Text("The model checks typos the lists can't settle (several possible fixes, or a misspelling that is also a real word) and words the macOS dictionary doesn't know, and only fixes one when the correction clearly fits the sentence better. Press Delete right after a fix to undo it.")
+            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        LabeledContent("Built-in list", value: "\(autocorrector?.builtInCount ?? 0) entries (Wikipedia)")
+        ForEach(autocorrector?.userListCounts ?? [], id: \.name) { list in
+            LabeledContent(list.name, value: "\(list.rules) entries")
+        }
+        HStack {
+            Text("Import plain misspelling->correction lists or AutoHotkey scripts like AutoCorrect.ahk.")
+                .font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Button("Show Folder") {
+                try? FileManager.default.createDirectory(at: Autocorrector.userListsDirectory, withIntermediateDirectories: true)
+                NSWorkspace.shared.open(Autocorrector.userListsDirectory)
+            }
+            Button("Import List…", action: importList)
+        }
+    }
+
+    private func importList() {
+        let panel = NSOpenPanel()
+        panel.allowsOtherFileTypes = true
+        panel.allowsMultipleSelection = true
+        panel.title = "Import autocorrect lists (.ahk or .txt)"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { _ = try? AppStatus.shared.autocorrector?.importList(from: url) }
+        state.autocorrectListsVersion += 1
     }
 }
 
@@ -165,6 +215,7 @@ private struct StatsSettings: View {
                 LabeledContent("Characters inserted", value: "\(stats.charactersInserted)")
                 LabeledContent("Keystrokes saved", value: "\(stats.keystrokesSaved)")
                 LabeledContent("Suggestions shown", value: "\(stats.suggestionsShown)")
+                LabeledContent("Typos fixed", value: "\(stats.correctionsMade)")
                 LabeledContent("Accept rate", value: acceptRate)
             }
             Section {

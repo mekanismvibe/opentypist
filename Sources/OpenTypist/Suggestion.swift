@@ -80,7 +80,12 @@ enum PromptBuilder {
         }
         let heal = !stripped && (body.last?.isLetter ?? false)
 
-        // Context goes first so it stays a stable, cached prefix while the user types.
+        let header = header(appName: appName, windowTitle: windowTitle, screenText: screenText)
+        return Prompt(text: header + body, strippedTrailingSpace: stripped, healLastToken: heal)
+    }
+
+    /// Context goes first so it stays a stable, cached prefix while the user types.
+    static func header(appName: String?, windowTitle: String?, screenText: String?) -> String {
         var header = ""
         if let appName, !appName.isEmpty {
             header = "Application: \(appName)\n"
@@ -92,7 +97,23 @@ enum PromptBuilder {
             header += "Visible on screen:\n\(screenText)\n\n"
         }
         if !header.isEmpty { header += "Text being written:\n" }
-        return Prompt(text: header + body, strippedTrailingSpace: stripped, healLastToken: heal)
+        return header
+    }
+
+    /// Prompt for scoring candidate words that come right after `context`.
+    /// Returns the prompt and the prefix to put before each candidate: the
+    /// space before a word belongs to the word's token, so it moves over.
+    static func scoringPrompt(context: String, appName: String?, windowTitle: String?, screenText: String?) -> (text: String, wordPrefix: String) {
+        var body = String(context.suffix(maxContextCharacters))
+        if body.count < context.count, let space = body.firstIndex(where: { $0.isWhitespace }) {
+            body = String(body[body.index(after: space)...])
+        }
+        var prefix = ""
+        while let last = body.last, last == " " || last == "\t" {
+            body.removeLast()
+            prefix = " "
+        }
+        return (header(appName: appName, windowTitle: windowTitle, screenText: screenText) + body, prefix)
     }
 
     /// Turns raw model output into the suggestion to display, or nil if it is

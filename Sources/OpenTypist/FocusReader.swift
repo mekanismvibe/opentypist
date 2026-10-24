@@ -22,6 +22,12 @@ struct FocusContext {
     /// Caret rectangle in Cocoa screen coordinates (origin bottom-left).
     let caretRect: CGRect?
     let style: TextStyle
+    let element: AXUIElement
+    let appElement: AXUIElement
+    /// The text field's frame, in Cocoa screen coordinates.
+    let elementFrame: CGRect?
+    /// Screen x where lines of text start in this field (for wrapping).
+    let lineStartX: CGFloat?
 }
 
 enum FocusFailure: Error, CustomStringConvertible {
@@ -125,6 +131,10 @@ enum FocusReader {
         }
 
         let previousIsNewline = before.last?.isNewline ?? false
+        // Index of the first character of the current hard line, if known.
+        let charactersOnLine = before.reversed().prefix(while: { !$0.isNewline })
+        let hardLineStart = charactersOnLine.count < before.count || before.utf16.count == caret
+            ? caret - String(charactersOnLine).utf16.count : nil
         return .success(FocusContext(
             pid: pid,
             bundleID: app.bundleIdentifier,
@@ -134,8 +144,94 @@ enum FocusReader {
             textBefore: before,
             textAfterOnLine: after,
             caretRect: caretRect(element, caret: caret, previousIsNewline: previousIsNewline),
-            style: textStyle(element, caret: caret)
+            style: textStyle(element, caret: caret),
+            element: element,
+            appElement: appElement,
+            elementFrame: frame(of: element),
+            lineStartX: lineStartX(element, caret: caret, hardLineStart: hardLineStart)
         ))
+    }
+
+    // MARK: - Layout
+
+    private static func frame(of element: AXUIElement) -> CGRect? {
+        guard let positionValue: AXValue = attribute(element, kAXPositionAttribute),
+              let sizeValue: AXValue = attribute(element, kAXSizeAttribute) else { return nil }
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue, .cgPoint, &position), AXValueGetValue(sizeValue, .cgSize, &size),
+              size.width > 0, size.height > 0 else { return nil }
+        return toCocoa(CGRect(origin: position, size: size))
+    }
+
+    /// Left edge of the caret's visual line: the first character of the line
+    /// (soft-wrapped or not), so wrapped ghost text lines up with real text.
+    private static func lineStartX(_ element: AXUIElement, caret: Int, hardLineStart: Int?) -> CGFloat? {
+        // Native text views: line number → character range → bounds.
+        var index = caret
+        if let lineValue = parameterized(element, kAXLineForIndexParameterizedAttribute, index as CFNumber),
+           let line = lineValue as? Int,
+           let rangeValue = parameterized(element, kAXRangeForLineParameterizedAttribute, line as CFNumber),
+           CFGetTypeID(rangeValue) == AXValueGetTypeID() {
+            var range = CFRange()
+            if AXValueGetValue(rangeValue as! AXValue, .cfRange, &range), range.location < caret {
+                index = range.location
+            }
+        } else if let hardLineStart, hardLineStart < caret {
+            index = hardLineStart
+        }
+        if index < caret, let r = bounds(element, location: index, length: 1), r.width < 200 {
+            return r.minX
+        }
+        // Web text: the caret's line as a text marker range.
+        var selected: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, "AXSelectedTextMarkerRange" as CFString, &selected) == .success,
+              let selected,
+              let caretMarker = parameterized(element, "AXStartTextMarkerForTextMarkerRange", selected),
+              let lineRange = parameterized(element, "AXLineTextMarkerRangeForTextMarker", caretMarker),
+              let start = parameterized(element, "AXStartTextMarkerForTextMarkerRange", lineRange),
+              let next = parameterized(element, "AXNextTextMarkerForTextMarker", start),
+              let firstCharacter = parameterized(element, "AXTextMarkerRangeForUnorderedTextMarkers", [start, next] as CFArray),
+              let value = parameterized(element, "AXBoundsForTextMarkerRange", firstCharacter),
+              CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var rect = CGRect.zero
+        guard AXValueGetValue(value as! AXValue, .cgRect, &rect), rect.height > 1, rect.origin != .zero, rect.width < 200 else { return nil }
+        return rect.minX
+    }
+
+    /// Screen x of the first thing to the right of the caret on its line that
+    /// isn't part of the text field, such as a send or microphone button.
+    static func obstacleX(in context: FocusContext, from startX: CGFloat, to endX: CGFloat) -> CGFloat? {
+        guard let caret = context.caretRect, endX > startX else { return nil }
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let y = Float(primaryHeight - caret.midY)
+        var x = startX + 4
+        while x <= endX {
+            var hit: AXUIElement?
+            if AXUIElementCopyElementAtPosition(context.appElement, Float(x), y, &hit) == .success,
+               let hit, !isPart(hit, of: context.element) {
+                return x
+            }
+            x += 10
+        }
+        return nil
+    }
+
+    /// Whether `element` is `field` or inside it (web text fields contain
+    /// static-text children).
+    private static func isPart(_ element: AXUIElement, of field: AXUIElement) -> Bool {
+        var current: AXUIElement? = element
+        for _ in 0..<6 {
+            guard let node = current else { return false }
+            if CFEqual(node, field) { return true }
+            current = attribute(node, kAXParentAttribute)
+        }
+        return false
+    }
+
+    private static func toCocoa(_ axRect: CGRect) -> CGRect {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        return CGRect(x: axRect.minX, y: primaryHeight - axRect.maxY, width: axRect.width, height: axRect.height)
     }
 
     // MARK: - Helpers

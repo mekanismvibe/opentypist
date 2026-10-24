@@ -5,6 +5,7 @@ import SwiftUI
 struct OnboardingView: View {
     @ObservedObject private var state = ViewState.shared
     @ObservedObject private var models = ModelManager.shared
+    @ObservedObject private var settings = Settings.shared
     let onFinish: () -> Void
 
     private let lastStep = 3
@@ -102,6 +103,10 @@ struct OnboardingView: View {
             }
             Text("OpenTypist lives in the menu bar (the text-cursor icon). From there you can pause it, turn it off for one app, change the suggestion length, and open this guide again.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 6) {
+                LaunchAtLoginToggle()
+                Toggle("Add a space after accepting a suggestion", isOn: $settings.acceptTrailingSpace)
+            }
         }
     }
 

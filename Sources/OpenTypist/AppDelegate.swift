@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let engine = EngineService()
     private lazy var controller = CompletionController(engine: engine)
+    private(set) lazy var autocorrector = Autocorrector(engine: engine)
     private let monitor = KeyboardMonitor()
     private let settings = Settings.shared
     private let models = ModelManager.shared
@@ -27,8 +28,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        monitor.onKeyDown = { [weak self] event in self?.controller.handleKeyDown(event) ?? false }
-        monitor.onMouseDown = { [weak self] in self?.controller.handleMouseDown() }
+        monitor.onKeyDown = { [weak self] event in self?.handleKeyDown(event) ?? false }
+        monitor.onMouseDown = { [weak self] in
+            self?.controller.handleMouseDown()
+            self?.autocorrector.reset()
+        }
+        controller.onAccept = { [weak self] text in self?.autocorrector.noteInserted(text) }
+        autocorrector.onTextChanged = { [weak self] in self?.controller.textChangedExternally() }
+        AppStatus.shared.autocorrector = autocorrector
 
         engine.onStateChange = { [weak self] state in
             AppStatus.shared.engine = state
@@ -41,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] note in
             guard let self else { return }
             self.controller.dismiss()
+            self.autocorrector.reset()
             if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication, app != .current {
                 self.lastExternalApp = app
             }
@@ -54,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async { self?.updateIcon() }
         }.store(in: &cancellables)
         settings.$disabledApps.dropFirst().sink { [weak self] _ in self?.controller.dismiss() }.store(in: &cancellables)
+        settings.$showMenuBarIcon.sink { [weak self] show in self?.statusItem.isVisible = show }.store(in: &cancellables)
 
         startKeyboardMonitorWhenAllowed()
         loadModel()
@@ -62,6 +71,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             showOnboarding()
         }
         updateIcon()
+    }
+
+    /// Order matters: accepting a suggestion wins over autocorrect, which
+    /// wins over normal typing.
+    private func handleKeyDown(_ event: CGEvent) -> Bool {
+        if controller.handleSuggestionKey(event) { return true }
+        if autocorrector.handleKeyDown(event, bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+            return true
+        }
+        controller.handleKeyDown(event)
+        return false
+    }
+
+    /// Opening the app again (Finder, Spotlight) shows Settings: the only
+    /// way back in when the menu bar icon is hidden.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -136,6 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lengthItem.submenu = lengthMenu
         menu.addItem(lengthItem)
 
+        let space = item("Add Space After Accepting", #selector(toggleTrailingSpace))
+        space.state = settings.acceptTrailingSpace ? .on : .off
+        menu.addItem(space)
+
         menu.addItem(.separator())
         let stats = Stats.shared
         for line in [
@@ -195,6 +226,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleEnabled() { settings.enabled.toggle() }
+
+    @objc private func toggleTrailingSpace() { settings.acceptTrailingSpace.toggle() }
 
     @objc private func toggleCurrentApp() {
         guard let bundleID = lastExternalApp?.bundleIdentifier else { return }

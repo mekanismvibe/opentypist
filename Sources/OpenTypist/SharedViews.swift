@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import ServiceManagement
 import SwiftUI
 
 /// View state lives in observable objects rather than `@State`: the SwiftUI
@@ -13,6 +14,10 @@ final class ViewState: ObservableObject {
     @Published var askedForScreenRecording = false
     @Published var selectedApp: String?
     @Published var settingsTab = "general"
+    @Published var autocorrectListsVersion = 0
+    @Published var launchAtLogin = LaunchAtLogin.isEnabled
+    @Published var launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
+    @Published var launchAtLoginError: String?
     @Published var pickedModelID: String = Settings.shared.selectedModelID
     @Published var onboardingStep = UserDefaults.standard.integer(forKey: "onboardingStep") {
         didSet { UserDefaults.standard.set(onboardingStep, forKey: "onboardingStep") }
@@ -29,6 +34,57 @@ final class ViewState: ObservableObject {
     func refreshPermissions() {
         if accessibilityGranted != FocusReader.isTrusted { accessibilityGranted = FocusReader.isTrusted }
         if screenRecordingGranted != ScreenContext.hasPermission { screenRecordingGranted = ScreenContext.hasPermission }
+        if launchAtLogin != LaunchAtLogin.isEnabled { launchAtLogin = LaunchAtLogin.isEnabled }
+        if launchAtLoginNeedsApproval != LaunchAtLogin.needsApproval { launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval }
+    }
+
+    /// Binding for a "Launch at login" toggle.
+    var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { self.launchAtLogin },
+            set: { enabled in
+                do {
+                    try LaunchAtLogin.set(enabled)
+                    self.launchAtLoginError = nil
+                } catch {
+                    self.launchAtLoginError = error.localizedDescription
+                }
+                self.refreshPermissions()
+            }
+        )
+    }
+}
+
+/// Registers OpenTypist as a login item with macOS.
+enum LaunchAtLogin {
+    static var isEnabled: Bool { SMAppService.mainApp.status == .enabled }
+    static var needsApproval: Bool { SMAppService.mainApp.status == .requiresApproval }
+
+    static func set(_ enabled: Bool) throws {
+        if enabled {
+            try SMAppService.mainApp.register()
+        } else {
+            try SMAppService.mainApp.unregister()
+        }
+    }
+}
+
+/// Launch-at-login toggle with approval and error notes.
+struct LaunchAtLoginToggle: View {
+    @ObservedObject private var state = ViewState.shared
+
+    var body: some View {
+        Toggle("Launch OpenTypist at login", isOn: state.launchAtLoginBinding)
+        if state.launchAtLoginNeedsApproval {
+            HStack {
+                Text("macOS needs you to allow OpenTypist in Login Items.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
+            }
+        }
+        if let error = state.launchAtLoginError {
+            Text(error).font(.callout).foregroundStyle(.red)
+        }
     }
 }
 

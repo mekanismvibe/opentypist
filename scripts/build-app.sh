@@ -23,6 +23,7 @@ cp .build/release/OpenTypist "$APP/Contents/MacOS/"
 cp Resources/Info.plist "$APP/Contents/"
 [ -f Resources/AppIcon.icns ] || swift scripts/make-icon.swift Resources/AppIcon.icns
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+cp -R Resources/autocorrect "$APP/Contents/Resources/"
 
 # ggml loads its compute backends (Metal, CPU variants, BLAS) with dlopen.
 cp "$BREW"/opt/ggml/libexec/libggml-*.so "$FW/"

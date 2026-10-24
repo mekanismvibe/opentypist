@@ -33,6 +33,40 @@ their SHA-256:
 
 You can also point OpenTypist at any other `.gguf` file.
 
+## Autocorrect
+
+OpenTypist also fixes misspellings as you type, in any app, the way
+[AutoCorrect.ahk](https://github.com/oxinabox/AutoCorrect) does on Windows:
+
+1. **Lists, instantly.** When a word ends (space, punctuation, Return), the
+   last typed text is looked up in the misspelling lists: the built-in
+   [Wikipedia list](Resources/autocorrect/README.md) (4,310 entries, CC BY-SA)
+   plus any lists you import. OpenTypist swallows the ending key, deletes the
+   typo, types the fix and sends the ending key again. Case follows what you
+   typed (`Teh` → `The`, `TEH` → `THE`).
+2. **The language model, a moment later.** Some typos the lists can't
+   settle: entries with several possible fixes (`achive` → achieve or
+   archive?), list "typos" that are real words (`loosing`, `payed`), and words
+   the macOS dictionary doesn't know (`stoer`). For these the model scores
+   each candidate in the surrounding text, with a keyboard-aware typo cost
+   (swapped letters and neighbouring keys are likely slips), and fixes the word
+   only if one candidate clearly fits better. This takes 20–120 ms and runs
+   after you've moved on, re-typing anything you typed in the meantime.
+   Capitalized words mid-sentence and ALL-CAPS words are left alone, since
+   they're probably names or acronyms.
+
+Press **Delete right after a fix** to undo it; that word won't be fixed again
+this session.
+
+A plain list beats the model for known misspellings (instant, free, never a
+surprising guess), and the model beats a list where context matters, so
+OpenTypist uses both. Import more lists in Settings → General → Autocorrect:
+`misspelling->correction` text files or AutoHotkey scripts. The importer
+understands `::typo::fix` hotstrings, the `*` (instant), `?` (inside words),
+`C` (case-sensitive) and `B0` options, multi-word triggers (`doe snot` →
+`does not`) and exception entries (`::design::` protecting it from
+`:?:ign::ing`).
+
 ## Permissions
 
 - **Accessibility** (required): reads the focused text field and caret, and
@@ -53,7 +87,14 @@ Input Monitoring.
 
 - Inline suggestions in any app that exposes its text fields through
   Accessibility, including Chromium/Electron/WebKit apps (via text markers)
-- Word-by-word or whole-suggestion accept
+- Word-by-word or whole-suggestion accept, optionally adding a space after
+  the accepted text (Settings → General, or the menu bar menu)
+- Ghost text wraps like real text: when a suggestion doesn't fit before the
+  field's right edge, or before a button inside the field (a send or
+  microphone button, found by hit-testing the line to the right of the caret),
+  the rest continues on the next line, aligned with where your lines start
+- Launch at login, and an option to hide the menu bar icon (open the app again
+  from Applications or Spotlight to get to Settings)
 - Suggestion length: short (3 words), medium (7) or long (15)
 - Context: the app name, window title and (with Screen Recording) the visible
   text of the window are added to the prompt, so suggestions fit the email,
@@ -129,8 +170,10 @@ so their text fields are visible to Accessibility.
 
 ## Known limitations
 
-- Ghost text uses the system font sized from the caret height, so it won't
-  exactly match the app's font.
+- Ghost text uses the field's font when the app reports it, otherwise the
+  system font sized from the caret height.
+- Wrapped continuation lines are drawn below the caret's line even when the
+  field hasn't grown to make room yet, so they can overlap what's below it.
 - Some apps (certain games, remote desktops, custom-drawn editors) don't expose
   their text through Accessibility; OpenTypist stays quiet there.
 - No personalization or learning from your writing yet.

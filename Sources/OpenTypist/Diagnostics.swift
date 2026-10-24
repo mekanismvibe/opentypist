@@ -8,6 +8,8 @@ final class AppStatus: ObservableObject {
 
     @Published var engine: EngineService.State = .idle
     @Published var keyboardTapRunning = false
+    /// For the settings window (list counts, importing).
+    var autocorrector: Autocorrector?
     /// What happened on the last completion attempt, in plain words. Never
     /// contains the user's text.
     @Published private(set) var lastCheck = "Waiting for you to type"
