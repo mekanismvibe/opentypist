@@ -299,6 +299,12 @@ so their text fields are visible to Accessibility.
   their text through Accessibility; OpenTypist stays quiet there.
 - No personalization or learning from your writing yet.
 
+## Windows
+
+A Windows version is planned. [docs/windows-port.md](docs/windows-port.md) is
+the porting brief: what to build with, every behavior and measured threshold
+to keep, the Windows-specific traps, and how it plugs into CI and releases.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). The Gemma model weights are distributed separately
