@@ -4,26 +4,22 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>OpenTypist</string>
 	<key>CFBundleExecutable</key>
 	<string>OpenTypist</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>org.opentypist.OpenTypist</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>OpenTypist</string>
-	<key>CFBundleDisplayName</key>
-	<string>OpenTypist</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.0</string>
-	<key>OTUpdateRepository</key>
-	<string>mekanismvibe/opentypist</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<string>0.3.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -35,15 +31,19 @@
 			</array>
 		</dict>
 	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>NSSupportsSuddenTermination</key>
-	<false/>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT License. Open source on-device autocomplete.</string>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+	<key>OTUpdateRepository</key>
+	<string>mekanismvibe/opentypist</string>
 </dict>
 </plist>

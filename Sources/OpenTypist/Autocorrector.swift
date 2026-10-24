@@ -134,7 +134,6 @@ final class Autocorrector {
 
         switch keyCode {
         case 51: // Delete (backspace)
-            status.note(lastFix == nil ? "Autocorrect: Delete pressed, nothing to undo" : "Autocorrect: Delete pressed, undoing")
             if let fix = lastFix {
                 undo(fix)
                 return true
