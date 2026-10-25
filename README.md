@@ -15,7 +15,8 @@ example → and ⌥→ in Slack.
 
 Everything runs locally with [llama.cpp](https://github.com/ggml-org/llama.cpp)
 on the GPU (Metal). Nothing you type leaves your Mac, password fields are never
-read, and the only data stored is a count of accepted words.
+read, sign-in and verification fields are left alone, and the only data stored
+is a count of accepted words.
 
 ## Models
 
@@ -169,11 +170,21 @@ Input Monitoring.
   Your text is never logged.
 - Per-app disable list (terminals, IDEs and password managers are off by
   default), plus a "Disable in <current app>" toggle in the menu bar
+- Fields where a guess does harm are left alone: sign-in and verification
+  fields (a label, placeholder or id asking for an email, username, phone,
+  PIN, code or card number, or an email address being typed) get no
+  suggestions, autocorrect or learning, and Mail's To, Cc and Subject fields
+  stay Mail's, since Tab moves between them there
 - Local stats: words accepted, keystrokes saved, accept rate
 - Streaming: a suggestion appears as soon as its first word is complete and
   grows word by word. On an M5 at "Balanced" the first word is ready in about
   30 ms (44 ms for the slowest 10%), against 58 ms / 143 ms for the whole
   suggestion; Tab accepts what's visible even while the rest is coming
+- A quick extra Tab never reaches the app: pressed in the moment between
+  accepting and the next suggestion, it accepts more of the same suggestion or
+  does nothing, instead of typing a tab or moving to another field
+- Suggestions that loop ("Hi S. Hi S. Hi S."), repeat the words just typed,
+  or look like chat-log or web-page leftovers are dropped
 - Confidence filter: a suggestion ends at the first word piece the model is
   unsure about (and a half-finished word goes with it), and nothing is shown
   if it's unsure from the start. Measured on sample messages with Gemma 4
