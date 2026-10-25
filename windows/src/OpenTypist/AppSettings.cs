@@ -36,12 +36,32 @@ public sealed class AppSettings
     public List<string> DisabledApps { get; set; } = [.. DefaultDisabledApps];
     /// Keys that accept the next word / the whole suggestion.
     public AcceptKeys AcceptKeys { get; set; } = AcceptKeys.Standard;
+    /// Per-app replacements for `AcceptKeys`, by executable name.
+    public Dictionary<string, AcceptKeys> AppAcceptKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    /// Short suggestions in a small card below the line when there is text
+    /// after the caret.
+    public bool MidLineSuggestions { get; set; } = true;
+    /// Fix known misspellings from the lists as soon as a word ends.
+    public bool AutocorrectEnabled { get; set; } = true;
+    /// Let the language model settle typos the lists can't.
+    public bool AiTypoFix { get; set; } = true;
+    /// Expand snippets.
+    public bool TextReplacementsEnabled { get; set; } = true;
+
+    public AcceptKeys AcceptKeysFor(string? appId) =>
+        appId is not null && AppAcceptKeys.TryGetValue(appId, out var keys) ? keys : AcceptKeys;
 
     [JsonIgnore]
     public string Path { get; private set; } = DefaultPath;
 
-    public static string DefaultPath => System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenTypist", "settings.json");
+    public static string DefaultPath => System.IO.Path.Combine(DataDirectory, "settings.json");
+
+    /// %APPDATA%\OpenTypist, or the folder in OPENTYPIST_TEST_STORE (tests
+    /// and screenshots never touch the user's settings or personal data).
+    public static string DataDirectory =>
+        Environment.GetEnvironmentVariable("OPENTYPIST_TEST_STORE") is { Length: > 0 } test
+            ? test
+            : System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenTypist");
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
@@ -81,8 +101,11 @@ public sealed class AppSettings
         Changed?.Invoke();
     }
 
+    private static readonly string OwnAppId = System.IO.Path.GetFileName(Environment.ProcessPath ?? "opentypist.exe").ToLowerInvariant();
+
+    /// Off in the listed apps and always in OpenTypist's own windows.
     public bool IsDisabled(string? appId) =>
-        appId is not null && DisabledApps.Contains(appId, StringComparer.OrdinalIgnoreCase);
+        appId is not null && (appId == OwnAppId || DisabledApps.Contains(appId, StringComparer.OrdinalIgnoreCase));
 
     public void SetDisabled(string appId, bool disabled)
     {

@@ -21,6 +21,9 @@ public sealed class TrayApp : IDisposable
     private readonly FocusReader reader = new();
     private readonly KeyboardHook hook = new();
     private CompletionController? controller;
+    private Autocorrector? autocorrector;
+    private TextReplacements? replacements;
+    private readonly NeverCorrect neverCorrect = new();
     private Forms.NotifyIcon? notifyIcon;
     private Icon? activeIcon, inactiveIcon;
     private SettingsWindow? settingsWindow;
@@ -39,6 +42,11 @@ public sealed class TrayApp : IDisposable
     public EngineService Engine => engine;
     public ModelManager Models => models;
     public bool HookRunning => hook.IsRunning;
+    public Autocorrector? Autocorrector => autocorrector;
+    public TextReplacements? Replacements => replacements;
+    public NeverCorrect NeverCorrect => neverCorrect;
+    /// The app the user was in before opening the menu or Settings.
+    public (string Id, string Name)? LastExternalApp => lastExternalApp;
 
     public TrayApp(Application app)
     {
@@ -48,13 +56,31 @@ public sealed class TrayApp : IDisposable
     public void Start(bool showSettings)
     {
         controller = new CompletionController(engine, reader, settings);
+        replacements = new TextReplacements(settings);
+        autocorrector = new Autocorrector(engine, reader, settings, replacements, neverCorrect);
+        controller.Accepted += autocorrector.NoteInserted;
+        autocorrector.TextChanged += controller.TextChangedExternally;
 
-        hook.OnKeyDown = controller.HandleKeyOnHookThread;
-        hook.OnMouseDown = () => dispatcher.BeginInvoke(() =>
+        // Order matters: accepting a suggestion wins over autocorrect, which
+        // wins over normal typing.
+        var completion = controller;
+        var corrector = autocorrector;
+        hook.OnKeyDown = e =>
         {
-            AppStatus.Log("mouse down: suggestion dismissed");
-            controller.HandleMouseDown();
-        });
+            if (completion.TryAcceptOnHookThread(e)) return true;
+            if (corrector.HandleKeyDown(e, ForegroundAppId())) return true;
+            completion.PostKeyDown(e);
+            return false;
+        };
+        hook.OnMouseDown = () =>
+        {
+            corrector.Reset();
+            dispatcher.BeginInvoke(() =>
+            {
+                AppStatus.Log("mouse down: suggestion dismissed");
+                completion.HandleMouseDown();
+            });
+        };
         if (hook.Start()) AppStatus.Note("Keyboard monitor started");
         else AppStatus.Note("Windows refused the keyboard hook");
 
@@ -167,6 +193,7 @@ public sealed class TrayApp : IDisposable
         lastForeground = hwnd;
         AppStatus.Log($"foreground changed: {ClassName(hwnd)}");
         controller?.Dismiss();
+        autocorrector?.Reset();
         if (hwnd == IntPtr.Zero) return;
         GetWindowThreadProcessId(hwnd, out int pid);
         if (pid == Environment.ProcessId || ClassName(hwnd) == "Shell_TrayWnd") return;
