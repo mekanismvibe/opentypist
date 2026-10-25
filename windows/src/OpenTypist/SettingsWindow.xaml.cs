@@ -6,7 +6,9 @@ using System.Windows.Media;
 
 namespace OpenTypist;
 
-/// Minimal settings (phase 1): general options and the model picker.
+/// Settings: general options and accept keys, autocorrect, snippets, apps
+/// (disabled list and per-app keys) and the model picker. The tabs other
+/// than General and Model are in SettingsWindow.Tabs.cs.
 public partial class SettingsWindow : Window
 {
     private readonly TrayApp app;
@@ -25,6 +27,7 @@ public partial class SettingsWindow : Window
         LoadValues();
         EnabledBox.Click += (_, _) => Update(() => settings.Enabled = EnabledBox.IsChecked == true);
         TrailingSpaceBox.Click += (_, _) => Update(() => settings.AcceptTrailingSpace = TrailingSpaceBox.IsChecked == true);
+        MidLineBox.Click += (_, _) => Update(() => settings.MidLineSuggestions = MidLineBox.IsChecked == true);
         AppContextBox.Click += (_, _) => Update(() => settings.UseAppContext = AppContextBox.IsChecked == true);
         GpuBox.Click += (_, _) => Update(() => settings.UseGpu = GpuBox.IsChecked == true);
         LoginBox.Click += (_, _) => AppSettings.LaunchAtLogin = LoginBox.IsChecked == true;
@@ -54,6 +57,10 @@ public partial class SettingsWindow : Window
         HardwareText.Text = "This PC: " + Hardware.Current.Summary;
         BuildModelList();
         RefreshStatus();
+        SetUpKeys();
+        SetUpAutocorrect();
+        SetUpSnippets();
+        SetUpApps();
     }
 
     public void SelectModelTab() => Tabs.SelectedItem = ModelTab;
@@ -72,8 +79,7 @@ public partial class SettingsWindow : Window
         LoginBox.IsChecked = AppSettings.LaunchAtLogin;
         LengthBox.SelectedIndex = (int)settings.Length;
         ConfidenceBox.SelectedIndex = (int)settings.Confidence;
-        KeysText.Text = $"{settings.AcceptKeys.Word.DisplayName} accepts the next word, {settings.AcceptKeys.All.DisplayName} the whole suggestion, Esc dismisses it.";
-        DisabledAppsText.Text = string.Join(", ", settings.DisabledApps) + ". Use \"Disable in <app>\" in the tray menu to add or remove the app you were just in.";
+        MidLineBox.IsChecked = settings.MidLineSuggestions;
         UpdateConfidenceHelp();
         loading = false;
     }
