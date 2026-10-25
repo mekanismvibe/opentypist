@@ -19,10 +19,24 @@ the updater, and CI and release jobs.
   wrapping like the field's text (up to 4 lines, before a send or emoji
   button on the line). In the middle of a line (text after the caret), a
   short suggestion in a small card below the line that leads into what
-  follows ("terested in" before " this job").
+  follows ("terested in" before " this job"). Mid-word, the whole
+  half-typed word is left for the model to spell with its own tokens
+  ("see you tomor" → "row", not "ow"), and a finished word that isn't a
+  real word is dropped. Suggestions that loop, repeat the last words typed,
+  start with a chat tag, contain HTML or talk about being an AI are dropped
+  too.
 - **Accept keys**: Tab (next word), Shift+Tab (whole suggestion), Esc
   dismisses. Both can be changed in Settings, and per app in Settings → Apps
-  (for example → and Alt+→ where Tab does something else).
+  (for example → and Alt+→ where Tab does something else). For 1.2 s after
+  accepting, an accept key is kept from the app while the rest of the
+  suggestion comes back (Tab, Tab takes two words, and never types a tab);
+  it never accepts a new suggestion you haven't seen.
+- **Fields left alone**: passwords; one-line sign-in and verification
+  fields (a label, placeholder or id asking for an email, username, phone,
+  PIN, code or card number, or an email address being typed), where
+  autocorrect and learning pause too; and in Outlook (classic and new) and
+  Windows Mail, the To, Cc and Subject fields, where Tab moves to the next
+  field.
 - **Autocorrect**, like the Mac app: Wikipedia's list of common misspellings
   (shared with the Mac app in `Resources/autocorrect`) fixes words as they
   end; the model settles the cases the list can't (several possible fixes, a

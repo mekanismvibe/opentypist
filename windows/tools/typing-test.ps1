@@ -14,15 +14,18 @@ OpenTypist isn't running). Edge runs with a throwaway profile in -Out.
 #>
 param(
     # edge-password: a password field, where no suggestion may appear.
-    [ValidateSet('notepad', 'edge', 'edge-password')] [string]$Target = 'notepad',
+    # edge-login: email, username and one-time-code fields (no suggestions,
+    # no autocorrect), then a notes box (suggestions as usual).
+    [ValidateSet('notepad', 'edge', 'edge-password', 'edge-login')] [string]$Target = 'notepad',
     # suggest: accept with Tab / Shift+Tab. autocorrect: list fix, Backspace
     # undo, model fix, snippet (needs an @@ snippet). midline: the card.
     # wrap: a narrow Edge text area. appkeys: Right / Alt+Right (needs
     # per-app keys for the target). learn: names, greetings and sign-offs
     # typed three times (check Settings > Personal afterwards). screen: an
     # Edge page with a message above the text area (needs "Use text visible
-    # on screen").
-    [ValidateSet('suggest', 'autocorrect', 'midline', 'wrap', 'appkeys', 'learn', 'screen')] [string]$Scenario = 'suggest',
+    # on screen"). tabgap: Tab, Tab quickly inside a suggestion, and Shift+Tab
+    # then Tab (no tab may reach the app). words: half-typed words to finish.
+    [ValidateSet('suggest', 'autocorrect', 'midline', 'wrap', 'appkeys', 'learn', 'screen', 'tabgap', 'words')] [string]$Scenario = 'suggest',
     [string]$Exe = (Join-Path $PSScriptRoot '..\..\build\windows\OpenTypist\OpenTypist.exe'),
     [string]$Out = (Join-Path $env:TEMP 'opentypist-typing-test'),
     [int]$KeyDelay = 70,
@@ -213,7 +216,7 @@ function Save-Screenshot($name) {
 }
 
 function Show-Log($since) {
-    Get-Content $log | Where-Object { $_ -gt $since -and $_ -match 'shown after|no good|caret|field|turned off|password|selected|not enough|administrator|refused|error|Autocorrect|Fixed|Undid|snippet|line\(s\)|card|button|on-screen|model again|Unloaded' } |
+    Get-Content $log | Where-Object { $_ -gt $since -and $_ -match 'shown after|no good|caret|field|turned off|password|selected|not enough|administrator|refused|error|Autocorrect|Fixed|Undid|snippet|line\(s\)|card|button|on-screen|model again|Unloaded|dropped|sign-in' } |
         Select-Object -Last 4 | ForEach-Object { "    log: $_" }
 }
 
@@ -226,6 +229,11 @@ if ($Target -eq 'notepad') {
 } else {
     $page = Join-Path $Out "$Target.html"
     $field = if ($Target -eq 'edge-password') { '<input type="password" autofocus style="font:16px Segoe UI;width:760px">' }
+             elseif ($Target -eq 'edge-login') {
+                 '<p><label for="email">Email address</label><br><input id="email" type="email" autofocus style="font:16px Segoe UI;width:400px"></p>' +
+                 '<p><input id="user" placeholder="Username" style="font:16px Segoe UI;width:400px"></p>' +
+                 '<p><input placeholder="6-digit code" autocomplete="one-time-code" inputmode="numeric" style="font:16px Segoe UI;width:200px"></p>' +
+                 '<p><textarea aria-label="Notes" style="font:16px Segoe UI;width:760px;height:120px"></textarea></p>' }
              elseif ($Scenario -eq 'screen') {
                  '<p><b>From: Sarah Lee</b></p><p>Hi! Could we move our meeting to Thursday at 3pm? The conference room on the fourth floor is booked, so let''s use the small room next to the kitchen.</p>' +
                  '<textarea autofocus style="font:16px Segoe UI;width:760px;height:160px"></textarea>' }
@@ -262,6 +270,32 @@ for ($i = 0; $i -lt $ZoomSteps; $i++) { [TypingTest]::PressCtrl(0xBB); Start-Sle
 $since = (Get-Date).ToString('HH:mm:ss.fff')
 
 $steps = if ($Target -eq 'edge-password') { @(@{ Name = '1-password'; Type = "Thanks for the update! Let me know if you need anything el" }) }
+elseif ($Target -eq 'edge-login') { @(
+    @{ Name = '1-email'; Type = "alice@exam"; Wait = 1500 },
+    @{ Name = '2-tab-to-username'; Key = 0x09 },
+    @{ Name = '3-username'; Type = "teh "; Wait = 1500 },
+    @{ Name = '4-tab-to-code'; Key = 0x09 },
+    @{ Name = '5-code'; Type = "123456"; Wait = 1500 },
+    @{ Name = '6-tab-to-notes'; Key = 0x09 },
+    @{ Name = '7-notes'; Type = "Thanks for the update! Let me know if you need anything el"; Wait = 1500 },
+    @{ Name = '8-tab'; Key = 0x09 }
+) }
+elseif ($Scenario -eq 'tabgap') { @(
+    @{ Name = '1-typed'; Type = "Hi Sarah, thanks for getting back to me so quickly. I'm running a few minutes late, so "; Wait = 1500 },
+    # Two quick presses: the second lands while the first word goes out.
+    @{ Name = '2-tab-tab'; Key = 0x09; Repeat = 2; Gap = 40 },
+    @{ Name = '3-typed'; Type = "`n`nThanks for the update! Let me know if you need anything el"; Wait = 1500 },
+    # Whole suggestion, then Tab before the next one is on screen.
+    @{ Name = '4-shift-tab-then-tab'; Keys = @(@{ Key = 0x09; Shift = $true }, @{ Key = 0x09 }); Gap = 150 }
+) }
+elseif ($Scenario -eq 'words') { @(
+    @{ Name = '1-very-in'; Type = "that is very in"; Wait = 1500 },
+    @{ Name = '2-tab'; Key = 0x09 },
+    @{ Name = '3-tomor'; Type = "`nsee you tomor"; Wait = 1500 },
+    @{ Name = '4-tab'; Key = 0x09 },
+    @{ Name = '5-appre'; Type = "`nI would really appre"; Wait = 1500 },
+    @{ Name = '6-tab'; Key = 0x09 }
+) }
 elseif ($Scenario -eq 'autocorrect') { @(
     @{ Name = '1-capitals'; Type = "Teh end. " },
     @{ Name = '2-list-fix'; Type = "`nI think teh " },
@@ -309,12 +343,16 @@ else { @(
 ) }
 foreach ($step in $steps) {
     $before = Get-FieldText
+    $gap = if ($step.Gap) { $step.Gap } else { $KeyDelay }
     if ($step.Type) { [TypingTest]::Type($step.Type, $KeyDelay) }
+    elseif ($step.Keys) {
+        foreach ($k in $step.Keys) { [TypingTest]::Press([uint16]$k.Key, [bool]$k.Shift); Start-Sleep -Milliseconds $gap }
+    }
     else {
         $repeat = if ($step.Repeat) { $step.Repeat } else { 1 }
         for ($i = 0; $i -lt $repeat; $i++) {
             if ($step.Alt) { [TypingTest]::PressAlt([uint16]$step.Key) } else { [TypingTest]::Press([uint16]$step.Key, [bool]$step.Shift) }
-            Start-Sleep -Milliseconds $KeyDelay
+            Start-Sleep -Milliseconds $gap
         }
     }
     Start-Sleep -Milliseconds $(if ($step.Wait) { $step.Wait } else { 1200 })

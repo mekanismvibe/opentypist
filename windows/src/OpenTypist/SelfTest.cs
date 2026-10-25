@@ -132,9 +132,19 @@ public static class SelfTest
             reply += addition;
             start.Restart();
             var prompt = PromptBuilder.Build(reply, "Mail", "Re: Lunch tomorrow?", thread);
-            var output = engine.Complete(prompt.Text, 20, prompt.HealLastToken, () => true, t => PromptBuilder.ShouldStop(t, 7));
+            var output = engine.Complete(prompt.Text, 20, prompt.WordPrefix, () => true, t => PromptBuilder.ShouldStop(t, 7));
             var text = output is null ? null : PromptBuilder.Clean(output.Text, prompt, 7, output.HitTokenLimit);
             Console.WriteLine($"[{start.ElapsedMilliseconds} ms] ...{Quote(TextUtil.Suffix(reply, 30))} -> {Quote(text)}");
+        }
+
+        // The whole half-typed word is healed: no "tomorow" or "appreaciate".
+        Console.WriteLine();
+        Console.WriteLine("== Finishing the half-typed word");
+        foreach (var typed in new[] { "that is very in", "see you tomor", "I would really appre", "Thanks for your help, I really appre", "Let's meet tomor" })
+        {
+            var suggestion = Suggest(engine, typed, "Notepad", null, CompletionLength.Medium, ConfidenceLevel.Balanced);
+            Console.WriteLine($"  {Quote(typed)} -> {Quote(suggestion)}");
+            if (suggestion is not null) Check(PromptBuilder.MakesRealWord(typed, suggestion, SpellCheck.IsValidWord), $"{typed} finishes as a real word");
         }
 
         // Does the profile (and do writing samples) change what the model suggests?
@@ -312,7 +322,7 @@ public static class SelfTest
                 {
                     positions++;
                     var prompt = PromptBuilder.Build(before, app, null);
-                    var output = engine.Complete(prompt.Text, 20, prompt.HealLastToken, () => true, t => PromptBuilder.ShouldStop(t, 7));
+                    var output = engine.Complete(prompt.Text, 20, prompt.WordPrefix, () => true, t => PromptBuilder.ShouldStop(t, 7));
                     if (output is null) continue;
                     bool midWord = !before.EndsWith(' ');
                     var truthWords = Words(truth);
@@ -343,7 +353,7 @@ public static class SelfTest
 
         // Finishing a half-typed word: 1-3 letters into longer words, scored
         // on whether the completed word shows up and is the right word.
-        var wordCases = new List<(PromptBuilder.Prompt Prompt, string Truth, LlamaEngine.Output Output)>();
+        var wordCases = new List<(string Before, PromptBuilder.Prompt Prompt, string Truth, LlamaEngine.Output Output)>();
         foreach (var (app, text) in corpus)
         {
             var allWords = text.Split(' ');
@@ -355,29 +365,34 @@ public static class SelfTest
                     if (target.Length < typedCount + 3 || !target.All(char.IsLetter)) continue;
                     var before = Join(allWords[..i]) + " " + allWords[i][..typedCount];
                     var prompt = PromptBuilder.Build(before, app, null);
-                    if (!prompt.HealLastToken) continue;
-                    var output = engine.Complete(prompt.Text, 20, true, () => true, t => PromptBuilder.ShouldStop(t, 7));
-                    if (output is not null) wordCases.Add((prompt, target[typedCount..], output));
+                    if (prompt.WordPrefix.Length == 0) continue;
+                    var output = engine.Complete(prompt.Text, 20, prompt.WordPrefix, () => true, t => PromptBuilder.ShouldStop(t, 7));
+                    if (output is not null) wordCases.Add((before, prompt, target[typedCount..], output));
                 }
             }
         }
         Console.WriteLine($"\nFinishing the current word ({wordCases.Count} half-typed words)");
-        Console.WriteLine("level      word threshold  completion shown  right word");
+        Console.WriteLine("level      word threshold  completion shown  right word  dropped as misspelled");
         foreach (var level in Enum.GetValues<ConfidenceLevel>())
         {
             foreach (var wordThreshold in new[] { level.MinProbability(), 0.15f, 0.1f, 0.06f, 0.04f, 0.02f }.Where(w => w <= level.MinProbability()))
             {
-                int shownWords = 0, rightWords = 0;
+                int shownWords = 0, rightWords = 0, misspelled = 0;
                 foreach (var item in wordCases)
                 {
                     var confident = PromptBuilder.ConfidentText(item.Output.Tokens, item.Output.HitTokenLimit, level.MinProbability(), wordThreshold);
                     if (PromptBuilder.Clean(confident.Text, item.Prompt, 7, confident.HitTokenLimit) is not string suggestion) continue;
                     var completion = Words(suggestion).FirstOrDefault();
                     if (completion is null) continue;
+                    if (!PromptBuilder.MakesRealWord(item.Before, suggestion, SpellCheck.IsValidWord))
+                    {
+                        misspelled++;
+                        continue;
+                    }
                     shownWords++;
                     if (completion == item.Truth) rightWords++;
                 }
-                Console.WriteLine($"{level.ToString().ToLowerInvariant(),-10} {wordThreshold:0.00}            {shownWords * 100.0 / wordCases.Count,5:0.0}%            {(shownWords > 0 ? rightWords * 100.0 / shownWords : 0),5:0.0}%");
+                Console.WriteLine($"{level.ToString().ToLowerInvariant(),-10} {wordThreshold:0.00}            {shownWords * 100.0 / wordCases.Count,5:0.0}%            {(shownWords > 0 ? rightWords * 100.0 / shownWords : 0),5:0.0}%      {misspelled}");
             }
         }
 
@@ -403,7 +418,7 @@ public static class SelfTest
                         var prompt = PromptBuilder.Build(before, app, null);
                         var clock = Stopwatch.StartNew();
                         double? firstWord = null;
-                        var output = engine.Complete(prompt.Text, CompletionLength.Medium.MaxTokens(), prompt.HealLastToken, () => true, t =>
+                        var output = engine.Complete(prompt.Text, CompletionLength.Medium.MaxTokens(), prompt.WordPrefix, () => true, t =>
                         {
                             if (firstWord is null && PromptBuilder.FirstCompleteWord(t, prompt) is not null) firstWord = clock.Elapsed.TotalMilliseconds;
                             return PromptBuilder.ShouldStop(t, CompletionLength.Medium.MaxWords());
@@ -549,7 +564,7 @@ public static class SelfTest
                 var prompt = PromptBuilder.Build(letter, "Outlook", null, profile: profile);
                 if (profile is not null) Check(prompt.Text.StartsWith($"About me:\n{profile}", StringComparison.Ordinal), "profile at the top of the prompt");
                 if (engine is null) continue;
-                var output = engine.Complete(prompt.Text, 6, false, () => true, t => t.Contains('\n'));
+                var output = engine.Complete(prompt.Text, 6, "", () => true, t => t.Contains('\n'));
                 Console.WriteLine($"  profile {(profile is null ? "off" : "on ")}: \"...Cheers,\\n\" -> {Quote(output?.Text)}");
             }
             if (engine is not null)
@@ -557,7 +572,7 @@ public static class SelfTest
                 foreach (bool chat in new[] { false, true })
                 {
                     var prompt = PromptBuilder.Build("hey are you free tonight? i was thinking we could", "WhatsApp", "Sam", profile: "I'm Alex.", examples: chat ? examples : []);
-                    var output = engine.Complete(prompt.Text, 12, prompt.HealLastToken, () => true, t => PromptBuilder.ShouldStop(t, 7));
+                    var output = engine.Complete(prompt.Text, 12, prompt.WordPrefix, () => true, t => PromptBuilder.ShouldStop(t, 7));
                     var suggestion = output is null ? null : PromptBuilder.Clean(output.Text, prompt, 7, output.HitTokenLimit);
                     Console.WriteLine($"  samples {(chat ? "on " : "off")}: \"...i was thinking we could\" -> {Quote(suggestion)}");
                 }
@@ -868,11 +883,51 @@ public static class SelfTest
         Check(PromptBuilder.FitBefore(" the report", " the report") is null, "fit nothing left");
         Console.WriteLine($"Mid-line fit: \"terested in this job\" before \" this job.\" -> {Quote(PromptBuilder.FitBefore(" this job.", "terested in this job"))}");
 
-        // Prompt: trailing space, token healing, header order, profile.
+        // Prompt: trailing space, the half-typed word, header order, profile.
         var spaced = PromptBuilder.Build("I'm running late, so ", "Notepad", "notes.txt - Notepad");
-        Check(spaced.StrippedTrailingSpace && !spaced.HealLastToken && spaced.Text.EndsWith("late, so"), "prompt trailing space");
-        var midWord = PromptBuilder.Build("I am very in", null, null);
-        Check(midWord.HealLastToken && !midWord.StrippedTrailingSpace && midWord.Text == "I am very in", "prompt healing");
+        Check(spaced.StrippedTrailingSpace && spaced.WordPrefix.Length == 0 && spaced.Text.EndsWith("late, so"), "prompt trailing space");
+        // A half-typed word leaves the prompt, with the space before it, and
+        // the model's output has to start with it.
+        var midWord = PromptBuilder.Build("that is very in", null, null);
+        Check(!midWord.StrippedTrailingSpace && midWord.Text == "that is very" && midWord.WordPrefix == " in", "half-typed word leaves the prompt");
+        var lineStart = PromptBuilder.Build("Hi,\nTha", null, null);
+        Check(lineStart.Text == "Hi,\n" && lineStart.WordPrefix == "Tha", "half-typed word at a line start");
+        Check(PromptBuilder.Build("see you ", null, null).WordPrefix.Length == 0, "no half-typed word after a space");
+        Check(PromptBuilder.Build("so quickly. I’m", null, null).WordPrefix == " I’m" && PromptBuilder.Build("we don't", null, null).WordPrefix == " don't",
+              "an apostrophe inside a word belongs to it");
+        Check(PromptBuilder.Build("he said 'hel", null, null).WordPrefix == "hel", "a quote before a word doesn't");
+
+        // Smart quotes don't break following a suggestion as it's typed.
+        var curly = new Suggestion("Thanks so", " much. I'm free", 1);
+        Check(curly.Remaining("Thanks so much. I’m") == " free", "curly quotes follow a suggestion");
+
+        // Finishing a half-typed word has to make a real word.
+        static bool Known(string w) => w is "tomorrow" or "appreciate";
+        Check(PromptBuilder.MakesRealWord("see you tomor", "row at", Known), "tomor+row is a word");
+        Check(!PromptBuilder.MakesRealWord("see you tomor", "ow at", Known), "tomor+ow is not");
+        Check(PromptBuilder.MakesRealWord("see you ", "tomorow", Known), "a new word isn't checked");
+        Check(PromptBuilder.MakesRealWord("ask Prox", "mox", Known) && PromptBuilder.MakesRealWord("an", "d so", Known), "capitalized and short words pass");
+
+        // Junk the model can be sure of.
+        Check(PromptBuilder.JunkReason(" Hi S. Hi S. Hi S.", "Hello") == "repeats itself", "junk: loop");
+        Check(PromptBuilder.JunkReason("o much. Hi Sarah, thanks for s", "Hi Sarah, thanks for s") == "repeats what was just typed", "junk: repeats the typing");
+        Check(PromptBuilder.JunkReason(" [User 0001] hello", "ok") is not null, "junk: chat tag");
+        Check(PromptBuilder.JunkReason(" <br> see you", "ok") == "contains HTML" && PromptBuilder.JunkReason(" for the <b> tag", "use <b>") is null, "junk: HTML");
+        Check(PromptBuilder.JunkReason(" As an AI, I can't", "Can you") is not null && PromptBuilder.JunkReason(" has an aim", "she") is null, "junk: AI talk");
+        Check(PromptBuilder.JunkReason(" so much for helping me move", "thanks") is null && PromptBuilder.JunkReason(" had had enough", "she") is null, "junk: fine text");
+
+        // Sign-in fields and mail header fields are left alone.
+        static bool SignIn(string[] labels, string[]? ids = null, string value = "", bool singleLine = true) =>
+            FieldPolicy.IsSignInField(singleLine, labels, ids ?? [], value);
+        Check(SignIn(["Email or phone"]) && SignIn(["Enter PIN"]) && SignIn(["Your e-mail"]) && SignIn(["Verification code"]) && SignIn(["6-digit code", "One-time code"]),
+              "sign-in labels");
+        Check(SignIn([], ["identifierId"]) && SignIn([], ["otp-input"]) && SignIn([], ["user_email"]) && SignIn([], ["txtPassword"]), "sign-in ids");
+        Check(SignIn([], value: "alice@exa") && SignIn([], value: "alice@example.com"), "an email address being typed");
+        Check(!SignIn(["Email subject"]) && !SignIn(["Search mail"], ["emailSearch"]) && !SignIn(["Promo code"]) && !SignIn(["Address and search bar"], ["view_1017"]),
+              "writing fields that mention email or codes");
+        Check(!SignIn(["Shipping address"], ["spinner-box"], "medium.com/@alice") && !SignIn(["Email"], singleLine: false), "URLs and multi-line fields");
+        Check(FieldPolicy.IsMailHeaderField("outlook.exe", true) && FieldPolicy.IsMailHeaderField("olk.exe", true)
+              && !FieldPolicy.IsMailHeaderField("outlook.exe", false) && !FieldPolicy.IsMailHeaderField("notepad.exe", true), "mail header fields");
         Check(PromptBuilder.Clean(" be there soon", spaced, 7, false) == "be there soon", "clean drops the space");
         Check(PromptBuilder.Clean("be there", spaced, 7, false) is null, "clean needs a space");
         Check(PromptBuilder.Clean(" one two three four", spaced, 3, true) == "one two three", "clean word limit");
