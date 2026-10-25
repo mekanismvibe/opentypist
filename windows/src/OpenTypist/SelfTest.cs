@@ -137,17 +137,8 @@ public static class SelfTest
             Console.WriteLine($"[{start.ElapsedMilliseconds} ms] ...{Quote(TextUtil.Suffix(reply, 30))} -> {Quote(text)}");
         }
 
-        // Does the profile reach the prompt and change what the model suggests?
-        Console.WriteLine();
-        Console.WriteLine("== Profile");
-        const string letter = "Hi Sarah,\n\nThanks again for your help with the move today, I really appreciate it.\n\nCheers,\n";
-        foreach (var profile in new[] { null, "I'm Alex Chen, a nurse in Toronto. I sign my emails \"Cheers, Alex\"." })
-        {
-            var prompt = PromptBuilder.Build(letter, "Mail", null, profile: profile);
-            if (profile is not null) Check(prompt.Text.StartsWith($"About me:\n{profile}"), "profile missing from prompt");
-            var output = engine.Complete(prompt.Text, 6, false, () => true, t => t.Contains('\n'));
-            Console.WriteLine($"  profile {(profile is null ? "off" : "on ")}: \"...Cheers,\\n\" -> {Quote(output?.Text)}");
-        }
+        // Does the profile (and do writing samples) change what the model suggests?
+        PersonalizationChecks(engine);
 
         var hardware = Hardware.Current;
         Console.WriteLine();
@@ -433,8 +424,145 @@ public static class SelfTest
     public static int RunOffline(string[] args)
     {
         AutocorrectChecks(null, args);
+        PersonalizationChecks(null);
         OfflineChecks();
         return failures == 0 ? 0 : 1;
+    }
+
+    /// Learning, profile updates, lock, history, encryption and samples,
+    /// against a throwaway store (never the user's data). A port of
+    /// `personalizationChecks` in SelfTest.swift.
+    private static void PersonalizationChecks(LlamaEngine? engine)
+    {
+        Console.WriteLine();
+        Console.WriteLine("== Personalization");
+        var folder = Path.Combine(Path.GetTempPath(), $"opentypist-selftest-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new SecureStore(folder);
+            var settings = new AppSettings { KeepWritingSamples = true };
+            var personal = new Personalization(settings, store);
+            bool spellChecker = SpellCheck.Languages.Count > 0;
+
+            for (int i = 0; i < 3; i++)
+            {
+                personal.ObserveWord("Sarah", false, "outlook.exe", "Outlook");
+                personal.ObserveWord("Proxmox", false, "outlook.exe", "Outlook");
+                personal.ObserveWord("homelab", false, "outlook.exe", "Outlook");
+                personal.ObserveLine("Hi Sarah,");
+                personal.ObserveLine("Cheers,");
+            }
+            foreach (var word in new[] { "colour", "organise", "favourite", "realised", "travelled", "color" }) personal.ObserveWord(word, false, null, "");
+            for (int i = 0; i < 16; i++) personal.ObserveWord("lol", true, "whatsapp.exe", "WhatsApp");
+            foreach (var (topic, line) in personal.GeneratedLines()) Console.WriteLine($"  [{topic}] {line}");
+
+            Console.WriteLine($"  auto update: {personal.UpdateProfile() ?? "no change"}");
+            var text = personal.Profile.Text;
+            Check(text.StartsWith(Personalization.DefaultProfile, StringComparison.Ordinal) && text.Contains("Proxmox") && text.Contains("British spelling")
+                  && text.Contains("\"Hi\"") && text.Contains("\"Cheers,\"") && text.Contains("In WhatsApp I write casually"), "learned lines go into the profile");
+            Check(!personal.IsNeverCorrect("sarah"), "names aren't never-correct words");
+            if (spellChecker) Check(personal.IsNeverCorrect("homelab") && personal.LearnedWords.Contains("homelab"), "learned words are never corrected");
+
+            // The user rewrites the names line: that topic is theirs from now on.
+            var namesLine = text.Split('\n').FirstOrDefault(l => l.StartsWith("People and things I often mention:", StringComparison.Ordinal)) ?? "";
+            personal.SaveProfileText(text.Replace(namesLine, "I work with Sarah on our Proxmox cluster."));
+            for (int i = 0; i < 3; i++) personal.ObserveWord("Jaxon", false, null, "");
+            Console.WriteLine($"  after edit + new name: {personal.UpdateProfile() ?? "no change"}");
+            text = personal.Profile.Text;
+            Check(text.Contains("I work with Sarah") && !text.Contains("Jaxon") && personal.Profile.UserOwnedTopics.Contains("names"), "an edited line is the user's");
+
+            personal.SetLocked(true);
+            for (int i = 0; i < 20; i++) personal.ObserveWord("color", false, null, "");
+            Check(personal.UpdateProfile() is null && !personal.Profile.Text.Contains("American"), "a locked profile stays as it is");
+            personal.SetLocked(false);
+            personal.SetMode(ProfileUpdateMode.AskFirst);
+            Console.WriteLine($"  ask-first proposal: {personal.UpdateProfile() ?? "none"}");
+            Check(personal.Profile.Proposal is { } proposal && proposal.Contains("American spelling") && !personal.Profile.Text.Contains("American"), "ask first proposes");
+            personal.ApplyProposal();
+            Check(personal.Profile.Text.Contains("American spelling") && personal.Profile.Proposal is null, "applying a proposal");
+            personal.AddNeverCorrect("Teh");
+            Check(personal.IsNeverCorrect("teh") && personal.NeverCorrectWords.Contains("teh"), "never correct");
+            var first = personal.Profile.History[0];
+            personal.Restore(first);
+            Check(personal.Profile.Text == first.Text && personal.Profile.History[^1].Source == ProfileVersion.Origin.Restored, "restoring a version");
+            Console.WriteLine($"  history: {string.Join(" | ", personal.Profile.History.Select(v => v.Note))}");
+
+            personal.Flush();
+            var reloaded = new Personalization(settings, store);
+            static string Json(object o) => System.Text.Json.JsonSerializer.Serialize(o);
+            Check(Json(reloaded.Profile) == Json(personal.Profile) && Json(reloaded.Learned) == Json(personal.Learned), "profile and learned data load again");
+            var raw = File.ReadAllBytes(Path.Combine(folder, "profile.bin"));
+            Check(!System.Text.Encoding.UTF8.GetString(raw).Contains("Proxmox"), "profile is encrypted");
+            Console.WriteLine($"  encrypted round-trip OK ({raw.Length} bytes on disk)");
+
+            // Phase 2 kept never-correct words in a file of their own.
+            store.Save("never-correct.bin", new List<string> { "Gonna" });
+            var migrated = new Personalization(settings, store);
+            Check(migrated.IsNeverCorrect("gonna") && migrated.IsNeverCorrect("teh") && !File.Exists(Path.Combine(folder, "never-correct.bin")), "never-correct words move into the learned data");
+            migrated.Flush();
+            personal.ForgetLearned();
+            personal.Flush();
+            Check(personal.LearnedNames.Count == 0 && personal.IsNeverCorrect("teh"), "forgetting keeps never-correct words");
+
+            // A long unbroken token stands in for an API key (a realistic-looking
+            // fake key would trip secret scanners).
+            var cleaned = WritingSamples.Clean("My card is 4111 1111 1111 1111 and the token is abcdefghij0123456789abcdefghij0123, thanks so much for helping") ?? "";
+            Console.WriteLine($"  clean: {cleaned}");
+            Check(!cleaned.Contains("4111") && !cleaned.Contains("abcdefghij0123"), "samples drop card numbers and tokens");
+            Check(WritingSamples.Clean("too short") is null && WritingSamples.Clean("{\"a\": 1, \"b\": [2, 3, 4], \"c\": \"<x/>\", \"d\": 5}") is null, "short or code-like text isn't kept");
+
+            // Samples are taken when the field is left or cleared (message sent).
+            var samples = new WritingSamples(settings, store);
+            FocusContext Field(string typed, string field = "1.2.3", string title = "Sam") =>
+                new(42, "whatsapp.exe", "WhatsApp", title, "Edit", typed, "", null, new TextStyle(), null, false, FieldId: field);
+            samples.Observe(Field("haha yeah that works"));
+            samples.Observe(Field("haha yeah that works for me, see you at 7 then! bring snacks"));
+            samples.Observe(Field(""));
+            Check(samples.Samples.Count == 1 && samples.Samples[0].Text.EndsWith("bring snacks", StringComparison.Ordinal), "a sample when a message is sent");
+            samples.Observe(Field("omg yes!! bring the dog too, she'll love it, and the frisbee"));
+            samples.Observe(Field("x", field: "9.9"));
+            Check(samples.Samples.Count == 2, "a sample when leaving the field");
+            samples.Observe(Field("ok sounds good, i'll grab snacks on the way over, see you soon"));
+            samples.Flush();
+            var examples = samples.Examples("whatsapp.exe", "Sam");
+            var header = PromptBuilder.Header("WhatsApp", "Sam", null, "I'm Alex.", examples);
+            Check(examples.Count == 3 && header.StartsWith("About me:\nI'm Alex.\n\nExamples of things I've written in WhatsApp:\n\"", StringComparison.Ordinal)
+                  && header.EndsWith("Application: WhatsApp\nWindow: Sam\nText being written:\n", StringComparison.Ordinal), "samples go into the prompt after the profile");
+            Check(!System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(Path.Combine(folder, "samples.bin"))).Contains("snacks"), "samples are encrypted");
+            Check(new WritingSamples(settings, store).Samples.Count == 3, "samples load again");
+            settings.KeepWritingSamples = false;
+            samples.Observe(Field("this should not be kept because samples are off now, really"));
+            samples.Flush();
+            Check(samples.Samples.Count == 3 && samples.Examples("whatsapp.exe", "Sam").Count == 0, "samples off: nothing kept or used");
+            samples.DeleteAll();
+            Check(samples.Samples.Count == 0 && !File.Exists(Path.Combine(folder, "samples.bin")), "deleting all samples");
+            Console.WriteLine($"  samples: {examples.Count} used in the prompt, {header.Length} characters of header");
+
+            // Does the profile change what the model suggests?
+            var letter = "Hi Sarah,\n\nThanks again for your help with the move today, I really appreciate it.\n\nCheers,\n";
+            foreach (var profile in new[] { null, "I'm Alex Chen, a nurse in Toronto. I sign my emails \"Cheers, Alex\"." })
+            {
+                var prompt = PromptBuilder.Build(letter, "Outlook", null, profile: profile);
+                if (profile is not null) Check(prompt.Text.StartsWith($"About me:\n{profile}", StringComparison.Ordinal), "profile at the top of the prompt");
+                if (engine is null) continue;
+                var output = engine.Complete(prompt.Text, 6, false, () => true, t => t.Contains('\n'));
+                Console.WriteLine($"  profile {(profile is null ? "off" : "on ")}: \"...Cheers,\\n\" -> {Quote(output?.Text)}");
+            }
+            if (engine is not null)
+            {
+                foreach (bool chat in new[] { false, true })
+                {
+                    var prompt = PromptBuilder.Build("hey are you free tonight? i was thinking we could", "WhatsApp", "Sam", profile: "I'm Alex.", examples: chat ? examples : []);
+                    var output = engine.Complete(prompt.Text, 12, prompt.HealLastToken, () => true, t => PromptBuilder.ShouldStop(t, 7));
+                    var suggestion = output is null ? null : PromptBuilder.Clean(output.Text, prompt, 7, output.HitTokenLimit);
+                    Console.WriteLine($"  samples {(chat ? "on " : "off")}: \"...i was thinking we could\" -> {Quote(suggestion)}");
+                }
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(folder, true); } catch (IOException) { }
+        }
     }
 
     /// `--download <id>`: the same download + SHA-256 check the Model tab uses.
@@ -472,6 +600,210 @@ public static class SelfTest
         if (!File.Exists(models.DownloadPathFor(model))) return 1;
         Console.WriteLine($"Done: {models.DownloadPathFor(model)} (choose it in Settings > Model, or pass --model to --selftest)");
         return 0;
+    }
+
+    /// `--update-test <folder> [--zip <OpenTypist-x.y.z-win-x64.zip>]`: runs
+    /// the real updater (download, checksum, unpack, version check, folder
+    /// swap) against the latest GitHub release, or a local zip with its
+    /// `.sha256` beside it, but swaps a throwaway copy of this app inside
+    /// <folder> instead of the installed one.
+    public static int UpdateTest(string[] args)
+    {
+        var folder = Argument(args, "--update-test");
+        if (folder is null || folder.StartsWith("--", StringComparison.Ordinal))
+        {
+            Console.WriteLine("Usage: OpenTypist.exe --update-test <folder> [--zip <OpenTypist-x.y.z-win-x64.zip>]");
+            return 1;
+        }
+        var target = Path.Combine(Path.GetFullPath(folder), "OpenTypist");
+        var work = Path.Combine(Path.GetTempPath(), $"OpenTypistUpdate-{Guid.NewGuid():N}");
+        try
+        {
+            Console.WriteLine($"Copying this app ({Updater.CurrentVersion}) to {target}");
+            if (Directory.Exists(target)) Directory.Delete(target, true);
+            CopyTree(Updater.AppFolder, target);
+
+            string newApp, version;
+            var zip = Argument(args, "--zip");
+            if (zip is not null)
+            {
+                var name = Path.GetFileName(zip);
+                var match = System.Text.RegularExpressions.Regex.Match(name, @"^OpenTypist-(\d+(?:\.\d+)*)-win-x64\.zip$");
+                if (!match.Success)
+                {
+                    Console.WriteLine($"FAILED: {name} isn't named like a release ({Versions.WindowsZip("x.y.z")})");
+                    return 1;
+                }
+                version = match.Groups[1].Value;
+                Directory.CreateDirectory(work);
+                Console.WriteLine($"Checking {name} against {name}.sha256 and unpacking");
+                newApp = Updater.Unpack(zip, File.ReadAllText(zip + ".sha256"), version, work);
+            }
+            else
+            {
+                Console.WriteLine($"Asking GitHub for the latest release of {Updater.Repository}");
+                var release = Updater.FetchLatest().GetAwaiter().GetResult();
+                if (release is null)
+                {
+                    Console.WriteLine("The latest release has no Windows build yet, so there is nothing to install. (Pass --zip to test a local build.)");
+                    return 3;
+                }
+                version = release.Version;
+                Console.WriteLine($"Downloading {release.Zip}");
+                var progress = new Progress<string>(m => { if (m.EndsWith("0%", StringComparison.Ordinal)) Console.WriteLine($"  {m}"); });
+                newApp = Updater.Prepare(release, progress, work).GetAwaiter().GetResult();
+            }
+            Console.WriteLine($"Swapping in {version}");
+            int code = Updater.FinishUpdate(["--finish-update", "0", target], relaunch: false, source: newApp);
+            var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(Path.Combine(target, "OpenTypist.exe"));
+            bool ok = code == 0 && (info.ProductVersion ?? "").Split('+')[0] == version && Directory.Exists(target + ".old");
+            Console.WriteLine(ok
+                ? $"Update test passed: {target} now holds OpenTypist {info.ProductVersion}, the old copy was moved to {Path.GetFileName(target)}.old"
+                : $"FAILED: exit code {code}, {target} holds {info.ProductVersion}");
+            return ok ? 0 : 1;
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or System.Net.Http.HttpRequestException or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"FAILED: {e.Message}");
+            return 1;
+        }
+        finally
+        {
+            foreach (var path in new[] { work, target + ".old" })
+            {
+                try { if (Directory.Exists(path)) Directory.Delete(path, true); } catch (IOException) { }
+            }
+        }
+    }
+
+    /// `--snapshot-settings <out.png> [--tab Personal]`, with
+    /// OPENTYPIST_TEST_STORE set: renders a whole Settings tab with sample
+    /// data, for checking the layout. Like `--snapshot-personal` on the Mac.
+    public static int SnapshotSettings(string[] args)
+    {
+        var output = Argument(args, "--snapshot-settings");
+        if (Environment.GetEnvironmentVariable("OPENTYPIST_TEST_STORE") is not { Length: > 0 } || output is null)
+        {
+            Console.WriteLine("Usage: set OPENTYPIST_TEST_STORE to an empty folder, then OpenTypist.exe --snapshot-settings out.png [--tab Personal|General|Stats|...] [--as-is]");
+            return 1;
+        }
+        var tab = Argument(args, "--tab") ?? "Personal";
+        var app = new System.Windows.Application { ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown };
+        SynchronizationContext.SetSynchronizationContext(new System.Windows.Threading.DispatcherSynchronizationContext());
+        var tray = new TrayApp(app);
+        int code = 1;
+        app.Startup += (_, _) =>
+        {
+            try
+            {
+                tray.StartPreview();
+                // --as-is: what the test store holds, without sample data.
+                if (!args.Contains("--as-is")) SeedPreview(tray);
+                var window = new SettingsWindow(tray)
+                {
+                    WindowStartupLocation = System.Windows.WindowStartupLocation.Manual,
+                    Left = -20000,
+                    Top = 0,
+                    ShowActivated = false,
+                    ShowInTaskbar = false,
+                };
+                window.Show();
+                window.SelectTab(tab);
+                window.UpdateLayout();
+                code = RenderTab(window, tab, Path.GetFullPath(output));
+                window.Close();
+            }
+            finally
+            {
+                tray.Shutdown();
+                app.Shutdown();
+            }
+        };
+        app.Run();
+        return code;
+    }
+
+    private static void SeedPreview(TrayApp tray)
+    {
+        var personal = tray.Personal;
+        for (int i = 0; i < 4; i++)
+        {
+            personal.ObserveWord("Sarah", false, "outlook.exe", "Outlook");
+            personal.ObserveWord("Proxmox", false, "outlook.exe", "Outlook");
+            personal.ObserveWord("homelab", false, "outlook.exe", "Outlook");
+            personal.ObserveLine("Hi Sarah,");
+            personal.ObserveLine("Cheers,");
+        }
+        for (int i = 0; i < 16; i++) personal.ObserveWord("lol", true, "whatsapp.exe", "WhatsApp");
+        personal.AddNeverCorrect("teh");
+        personal.AddNeverCorrect("gonna");
+        personal.SetMode(ProfileUpdateMode.AskFirst);
+        personal.UpdateProfile();
+        tray.Settings.KeepWritingSamples = true;
+        tray.Samples.Record(new WritingSample(Guid.NewGuid(), DateTime.Now, "whatsapp.exe", "WhatsApp", "Sam", "haha yeah that works for me, see you at 7 then! bring snacks"));
+        tray.Replacements?.Add("@@", "alex@example.com");
+        tray.Replacements?.Add(";addr", "1 Main Street\nSpringfield");
+        var days = new Dictionary<string, int>();
+        var recent = tray.Stats.RecentDays(30);
+        for (int offset = 0; offset < recent.Count; offset++) days[Stats.DayKey(recent[offset].Date)] = new[] { 0, 40, 85, 120, 60, 0, 30 }[offset % 7] + offset * 3;
+        tray.Stats.SetDailyWordsForPreview(days);
+        tray.Settings.AppAcceptKeys["slack.exe"] = new AcceptKeys(KeyCombo.RightArrow, KeyCombo.AltRightArrow);
+    }
+
+    /// Renders all of a tab, not only what fits in the window.
+    private static int RenderTab(SettingsWindow window, string header, string output)
+    {
+        var item = window.Tabs.Items.OfType<System.Windows.Controls.TabItem>().FirstOrDefault(t => (string)t.Header == header);
+        if (item is null)
+        {
+            Console.WriteLine($"No tab named {header}");
+            return 1;
+        }
+        System.Windows.FrameworkElement content;
+        if (item.Content is System.Windows.Controls.ScrollViewer viewer)
+        {
+            content = (System.Windows.FrameworkElement)viewer.Content;
+            viewer.Content = null;
+        }
+        else
+        {
+            content = (System.Windows.FrameworkElement)item.Content;
+            item.Content = null;
+        }
+        const double width = 680;
+        var host = new System.Windows.Controls.Border
+        {
+            Background = System.Windows.SystemColors.WindowBrush,
+            Child = content,
+            Width = width,
+        };
+        // The window's font, which the detached content no longer inherits.
+        System.Windows.Documents.TextElement.SetFontFamily(host, window.FontFamily);
+        System.Windows.Documents.TextElement.SetFontSize(host, window.FontSize);
+        host.Measure(new System.Windows.Size(width, double.PositiveInfinity));
+        host.Arrange(new System.Windows.Rect(host.DesiredSize));
+        host.UpdateLayout();
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(host.ActualWidth), (int)Math.Ceiling(host.ActualHeight), 96, 96,
+            System.Windows.Media.PixelFormats.Pbgra32);
+        bitmap.Render(host);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        using (var file = File.Create(output)) encoder.Save(file);
+        Console.WriteLine($"Saved {output} ({bitmap.PixelWidth}x{bitmap.PixelHeight})");
+        return 0;
+    }
+
+    private static void CopyTree(string source, string target)
+    {
+        foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(target, Path.GetRelativePath(source, dir)));
+        }
+        Directory.CreateDirectory(target);
+        foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+        {
+            File.Copy(file, Path.Combine(target, Path.GetRelativePath(source, file)));
+        }
     }
 
     private static void OfflineChecks()
@@ -598,8 +930,6 @@ public static class SelfTest
         try
         {
             var store = new SecureStore(folder);
-            var never = new NeverCorrect(store);
-            never.Remove("x");
             var replacements = new TextReplacements(new AppSettings(), store);
             Check(replacements.Add("@@", "me@example.com") is null && replacements.Add("@@", "again") is not null
                   && replacements.Add("a b", "x") is not null && replacements.Add("sig.", "x") is not null, "snippet rules");
@@ -616,7 +946,141 @@ public static class SelfTest
             try { Directory.Delete(folder, true); } catch (IOException) { }
         }
 
+        UpdaterChecks();
+        PowerAndStatsChecks();
+        ScreenContextChecks();
+
         Console.WriteLine(failures == 0 ? "\nAll checks passed" : $"\n{failures} check(s) FAILED");
+    }
+
+    private static void UpdaterChecks()
+    {
+        Console.WriteLine();
+        Console.WriteLine($"== Updates (this is OpenTypist {Updater.CurrentVersion})");
+        Check(Versions.IsNewer("0.10.0", "0.9.2") && Versions.IsNewer("0.2.0", "0.1.0") && Versions.IsNewer("v1.0", "0.9"), "newer versions");
+        Check(!Versions.IsNewer("0.2.0", "0.2.0") && !Versions.IsNewer("0.1.9", "0.2") && !Versions.IsNewer("0.2", "0.2.0"), "not newer");
+        Check(System.Text.RegularExpressions.Regex.IsMatch(Updater.CurrentVersion, @"^\d+(\.\d+)+$"), "the app knows its version");
+
+        static System.Text.Json.JsonElement Release(string json) => System.Text.Json.JsonDocument.Parse(json).RootElement;
+        const string mac = """{"name": "OpenTypist-0.4.0.dmg", "browser_download_url": "https://example.com/mac.dmg"}""";
+        const string zip = """{"name": "OpenTypist-0.4.0-win-x64.zip", "browser_download_url": "https://example.com/win.zip"}""";
+        const string sum = """{"name": "OpenTypist-0.4.0-win-x64.zip.sha256", "browser_download_url": "https://example.com/win.zip.sha256"}""";
+        var both = Updater.ParseRelease(Release($$"""{"tag_name": "v0.4.0", "draft": false, "prerelease": false, "body": "Notes", "html_url": "https://example.com/r", "assets": [{{mac}}, {{zip}}, {{sum}}]}"""));
+        Check(both is { Version: "0.4.0", Zip: "https://example.com/win.zip", Checksum: "https://example.com/win.zip.sha256" }, "a release with a Windows build");
+        Check(Updater.ParseRelease(Release($$"""{"tag_name": "v0.4.0", "draft": false, "prerelease": false, "assets": [{{mac}}]}""")) is null, "a release with only the Mac build (Windows still building)");
+        Check(Updater.ParseRelease(Release($$"""{"tag_name": "v0.4.0", "draft": false, "prerelease": true, "assets": [{{mac}}, {{zip}}, {{sum}}]}""")) is null, "pre-releases are skipped");
+
+        // Checksum, unpack and version check on a zip of this very exe.
+        var work = Path.Combine(Path.GetTempPath(), $"OpenTypistUpdate-{Guid.NewGuid():N}");
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (exe is null || !exe.EndsWith("OpenTypist.exe", StringComparison.OrdinalIgnoreCase)) return;
+            var source = Path.Combine(work, "src", "OpenTypist");
+            Directory.CreateDirectory(source);
+            File.Copy(exe, Path.Combine(source, "OpenTypist.exe"));
+            var package = Path.Combine(work, Versions.WindowsZip(Updater.CurrentVersion));
+            System.IO.Compression.ZipFile.CreateFromDirectory(Path.Combine(work, "src"), package);
+            var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(package))).ToLowerInvariant();
+            var folder = Updater.Unpack(package, $"{hash}  {Path.GetFileName(package)}\n", Updater.CurrentVersion, Path.Combine(work, "a"));
+            Check(File.Exists(Path.Combine(folder, "OpenTypist.exe")), "a verified zip unpacks");
+            bool refused;
+            try { Updater.Unpack(package, new string('0', 64), Updater.CurrentVersion, Path.Combine(work, "b")); refused = false; }
+            catch (InvalidDataException) { refused = true; }
+            Check(refused, "a zip that doesn't match its checksum is refused");
+            try { Updater.Unpack(package, hash, "99.0.0", Path.Combine(work, "c")); refused = false; }
+            catch (InvalidDataException) { refused = true; }
+            Check(refused, "a zip with another version inside is refused");
+        }
+        finally
+        {
+            try { Directory.Delete(work, true); } catch (IOException) { }
+        }
+    }
+
+    private static void PowerAndStatsChecks()
+    {
+        Console.WriteLine();
+        Console.WriteLine("== Memory, battery and stats");
+        Check(PowerRules.Current(false, false, PowerBehavior.Pause, PowerBehavior.Pause) == PowerBehavior.Normal, "plugged in: as usual");
+        Check(PowerRules.Current(true, false, PowerBehavior.SmallerModel, PowerBehavior.Pause) == PowerBehavior.SmallerModel, "on battery");
+        Check(PowerRules.Current(true, true, PowerBehavior.SmallerModel, PowerBehavior.Pause) == PowerBehavior.Pause, "battery saver wins");
+        Check(PowerRules.Current(true, true, PowerBehavior.SmallerModel, PowerBehavior.Normal) == PowerBehavior.SmallerModel, "battery saver set to normal: battery rule");
+        var now = new DateTime(2026, 10, 24, 12, 0, 0);
+        Check(PowerRules.ShouldUnloadForIdle(true, 15, now.AddMinutes(-16), now) && !PowerRules.ShouldUnloadForIdle(true, 15, now.AddMinutes(-14), now)
+              && !PowerRules.ShouldUnloadForIdle(false, 15, now.AddHours(-5), now), "idle unload");
+
+        var folder = Path.Combine(Path.GetTempPath(), $"opentypist-selftest-{Guid.NewGuid():N}");
+        try
+        {
+            var clock = now;
+            var path = Path.Combine(folder, "stats.json");
+            var stats = new Stats(path, () => clock);
+            stats.RecordShown();
+            stats.RecordShown();
+            stats.RecordAccepted("I'll ");
+            stats.RecordAccepted("be there soon ");
+            stats.RecordCorrection();
+            Check(stats.WordsAccepted == 4 && stats.WordsAcceptedToday == 4 && stats.CharactersInserted == 19 && stats.KeystrokesSaved == 17
+                  && stats.AcceptRate == 1 && stats.CorrectionsMade == 1, "stats counts");
+            clock = now.AddDays(1);
+            stats.RecordAccepted("ok ");
+            var days = stats.RecentDays(30);
+            Check(stats.WordsAcceptedToday == 1 && days.Count == 30 && days[^1].Words == 1 && days[^2].Words == 4 && days[^1].Date == clock.Date, "words per day");
+            stats.Flush();
+            var reloaded = new Stats(path, () => clock);
+            Check(reloaded.WordsAccepted == 5 && reloaded.RecentDays(2)[0].Words == 4, "stats load again");
+            Check(!File.ReadAllText(path).Contains("there"), "stats keep counts, never text");
+            reloaded.Reset();
+            Check(reloaded.WordsAccepted == 0 && reloaded.AcceptRate is null, "reset");
+            reloaded.Flush();
+        }
+        finally
+        {
+            try { Directory.Delete(folder, true); } catch (IOException) { }
+        }
+    }
+
+    private static void ScreenContextChecks()
+    {
+        Console.WriteLine();
+        Console.WriteLine("== Screen context");
+        var lines = new List<ScreenText.Line>
+        {
+            new("Inbox", 10, 20),
+            new("From: Sarah", 200, 100),
+            new("Can we move the meeting to Thursday?", 200, 130),
+            new("Thanks, Sarah", 200, 160),
+            new("Sure, Thursday works", 200, 400),
+            new("Unrelated footer text far away", 10, 900),
+        };
+        var picked = ScreenText.Select(lines, 400, "Hi Sarah,\nSure, Thursday works", budget: 80);
+        Console.WriteLine($"  picked: {Quote(picked)}");
+        Check(!picked.Contains("Sure, Thursday works") && picked.Contains("Can we move the meeting") && !picked.Contains("footer"), "typed text dropped, nearest lines kept");
+        Check(picked.IndexOf("From: Sarah", StringComparison.Ordinal) < picked.IndexOf("Thanks, Sarah", StringComparison.Ordinal), "reading order");
+        // Mid-line, OCR sees the whole line (and reads the caret as a letter).
+        var midLine = ScreenText.Select([.. lines, new("I am very inl this job.", 210, 430)], 430, "I am very in", field: new ScreenText.Area(190, 380, 800, 460));
+        Check(!midLine.Contains("this job") && !midLine.Contains("Sure, Thursday") && midLine.Contains("Thursday?"), "the text field's own text is left out");
+        Check(PromptBuilder.Header(null, null, picked).StartsWith("Visible on screen:\n", StringComparison.Ordinal), "screen text goes into the prompt");
+
+        if (!ScreenContext.IsAvailable)
+        {
+            Console.WriteLine("  Windows text recognition isn't installed for this user's languages; OCR check skipped");
+            return;
+        }
+        using var bitmap = new System.Drawing.Bitmap(900, 200);
+        using (var g = System.Drawing.Graphics.FromImage(bitmap))
+        {
+            g.Clear(System.Drawing.Color.White);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            using var font = new System.Drawing.Font("Segoe UI", 20);
+            g.DrawString("Can we move the meeting to Thursday?", font, System.Drawing.Brushes.Black, 20, 30);
+            g.DrawString("Thanks, Sarah", font, System.Drawing.Brushes.Black, 20, 110);
+        }
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var recognized = ScreenContext.RecognizeLines(bitmap).GetAwaiter().GetResult();
+        Console.WriteLine($"  OCR ({started.ElapsedMilliseconds} ms): {string.Join(" | ", recognized.Select(l => $"{l.Text} @{l.Y:0}"))}");
+        Check(recognized.Count == 2 && recognized[0].Text.Contains("Thursday") && recognized[1].Text.Contains("Sarah") && recognized[0].Y < recognized[1].Y, "OCR reads lines in order");
     }
 
     private static void Check(bool condition, string name)

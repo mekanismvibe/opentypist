@@ -18,8 +18,11 @@ param(
     # suggest: accept with Tab / Shift+Tab. autocorrect: list fix, Backspace
     # undo, model fix, snippet (needs an @@ snippet). midline: the card.
     # wrap: a narrow Edge text area. appkeys: Right / Alt+Right (needs
-    # per-app keys for the target).
-    [ValidateSet('suggest', 'autocorrect', 'midline', 'wrap', 'appkeys')] [string]$Scenario = 'suggest',
+    # per-app keys for the target). learn: names, greetings and sign-offs
+    # typed three times (check Settings > Personal afterwards). screen: an
+    # Edge page with a message above the text area (needs "Use text visible
+    # on screen").
+    [ValidateSet('suggest', 'autocorrect', 'midline', 'wrap', 'appkeys', 'learn', 'screen')] [string]$Scenario = 'suggest',
     [string]$Exe = (Join-Path $PSScriptRoot '..\..\build\windows\OpenTypist\OpenTypist.exe'),
     [string]$Out = (Join-Path $env:TEMP 'opentypist-typing-test'),
     [int]$KeyDelay = 70,
@@ -210,7 +213,7 @@ function Save-Screenshot($name) {
 }
 
 function Show-Log($since) {
-    Get-Content $log | Where-Object { $_ -gt $since -and $_ -match 'shown after|no good|caret|field|turned off|password|selected|not enough|administrator|refused|error|Autocorrect|Fixed|Undid|snippet|line\(s\)|card|button' } |
+    Get-Content $log | Where-Object { $_ -gt $since -and $_ -match 'shown after|no good|caret|field|turned off|password|selected|not enough|administrator|refused|error|Autocorrect|Fixed|Undid|snippet|line\(s\)|card|button|on-screen|model again|Unloaded' } |
         Select-Object -Last 4 | ForEach-Object { "    log: $_" }
 }
 
@@ -223,6 +226,9 @@ if ($Target -eq 'notepad') {
 } else {
     $page = Join-Path $Out "$Target.html"
     $field = if ($Target -eq 'edge-password') { '<input type="password" autofocus style="font:16px Segoe UI;width:760px">' }
+             elseif ($Scenario -eq 'screen') {
+                 '<p><b>From: Sarah Lee</b></p><p>Hi! Could we move our meeting to Thursday at 3pm? The conference room on the fourth floor is booked, so let''s use the small room next to the kitchen.</p>' +
+                 '<textarea autofocus style="font:16px Segoe UI;width:760px;height:160px"></textarea>' }
              elseif ($Scenario -eq 'wrap') { '<textarea autofocus style="font:16px Segoe UI;width:420px;height:220px"></textarea>' }
              else { '<textarea autofocus style="font:16px Segoe UI;width:760px;height:220px"></textarea>' }
     # A title of its own, so a test window left from another run is never typed into.
@@ -272,6 +278,16 @@ elseif ($Scenario -eq 'midline') { @(
 elseif ($Scenario -eq 'wrap') { @(
     @{ Name = '1-typed'; Type = "Hi Sarah, thanks for getting back to me so quickly. I'm running a few minutes late, so " },
     @{ Name = '2-shift-tab'; Key = 0x09; Shift = $true }
+) }
+elseif ($Scenario -eq 'learn') {
+    $note = "Hi Priya,`nThanks for the notes on Kestrel. I talked to Tomasz and Priya about Kestrel today.`nCheers,`n`n"
+    @(1..3 | ForEach-Object { @{ Name = "$_-note"; Type = $note } })
+}
+elseif ($Scenario -eq 'screen') { @(
+    @{ Name = '1-typed'; Type = "Hi Sarah, Thursday at 3pm works for me. I'll meet you in the "; Wait = 2500 },
+    # The first read of the window happens in the background; type on.
+    @{ Name = '2-typed'; Type = "small room "; Wait = 2500 },
+    @{ Name = '3-shift-tab'; Key = 0x09; Shift = $true }
 ) }
 elseif ($Scenario -eq 'appkeys') { @(
     # (Tab itself isn't pressed: with other accept keys it reaches the
