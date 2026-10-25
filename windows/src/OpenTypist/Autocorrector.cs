@@ -26,7 +26,10 @@ public sealed class Autocorrector
     private readonly FocusReader reader;
     private readonly AppSettings settings;
     private readonly TextReplacements replacements;
-    private readonly NeverCorrect neverCorrect;
+    private readonly Personalization personal;
+    private readonly WritingSamples samples;
+    private readonly ScreenContext screen;
+    private readonly Stats stats;
     private readonly Dispatcher dispatcher;
     private readonly object gate = new();
 
@@ -38,6 +41,8 @@ public sealed class Autocorrector
     private const int MaxTyped = 80;
     /// The key after a dead key types a combined character we can't see.
     private bool afterDeadKey;
+    /// The foreground app, for learning per-app style.
+    private (string Id, string Name)? currentApp;
 
     /// The last fix, while Backspace can still undo it.
     private (string Original, string Replacement, string Ending)? lastFix;
@@ -67,13 +72,17 @@ public sealed class Autocorrector
     /// Without it the model happily turns "recipt" into "recipe".
     private const double TypoCostWeight = 2.0;
 
-    public Autocorrector(EngineService engine, FocusReader reader, AppSettings settings, TextReplacements replacements, NeverCorrect neverCorrect)
+    public Autocorrector(EngineService engine, FocusReader reader, AppSettings settings, TextReplacements replacements,
+        Personalization personal, WritingSamples samples, ScreenContext screen, Stats stats)
     {
         this.engine = engine;
         this.reader = reader;
         this.settings = settings;
         this.replacements = replacements;
-        this.neverCorrect = neverCorrect;
+        this.personal = personal;
+        this.samples = samples;
+        this.screen = screen;
+        this.stats = stats;
         dispatcher = Dispatcher.CurrentDispatcher;
         ReloadRules();
     }
@@ -143,6 +152,12 @@ public sealed class Autocorrector
         afterDeadKey = false;
     }
 
+    /// The app that came to the foreground (UI thread).
+    public void SetCurrentApp(string id, string name)
+    {
+        lock (gate) currentApp = (id, name);
+    }
+
     /// The completion controller inserted accepted suggestion text.
     public void NoteInserted(string text)
     {
@@ -155,7 +170,8 @@ public sealed class Autocorrector
     }
 
     /// Hook thread. Returns true to swallow the key (we replaced the text
-    /// ourselves).
+    /// ourselves). Runs even with autocorrect off, so typing habits are
+    /// still learned.
     public bool HandleKeyDown(KeyEvent e, string? appId)
     {
         lock (gate)
@@ -213,14 +229,16 @@ public sealed class Autocorrector
 
         if (AutocorrectRules.IsEndCharacter(c))
         {
+            bool startsSentence = StartsSentence(typed[..^AutocorrectRules.LastWord(typed).Length]);
             bool swallowed = WordEnded(c);
             if (!swallowed) Append(c.ToString());
+            LearnFromEnding(c, startsSentence);
             return swallowed;
         }
 
         Append(c.ToString());
         if (settings.AutocorrectEnabled && rules.MatchImmediate(typed) is AutocorrectMatch.Fix fix
-            && !neverCorrect.Contains(AutocorrectRules.LastWord(typed)))
+            && !personal.IsNeverCorrect(AutocorrectRules.LastWord(typed)))
         {
             // The app hasn't received `c` yet: delete the rest of the trigger.
             new InputBatch().Backspace(AutocorrectRules.Backspaces(typed[^fix.Length..]) - 1).Text(fix.Replacement).SendFromHook();
@@ -229,6 +247,18 @@ public sealed class Autocorrector
             return true;
         }
         return false;
+    }
+
+    /// Feeds the word (as it ended up, after any instant fix) and, at the end
+    /// of a line, the line to the learner. Only typed keys are ever used.
+    private void LearnFromEnding(char ending, bool startsSentence)
+    {
+        var before = typed.Length > 0 ? typed[..^1] : "";
+        var word = AutocorrectRules.LastWord(before);
+        var appId = Win32.ForegroundAppId();
+        var appName = currentApp is { } app && app.Id == appId ? app.Name : appId ?? "";
+        if (word.Length > 0) personal.ObserveWord(word, startsSentence, appId, appName);
+        if (ending == '\n') personal.ObserveLine(before[(before.LastIndexOf('\n') + 1)..]);
     }
 
     /// Returns true if the ending key was swallowed and replayed after a fix.
@@ -243,7 +273,7 @@ public sealed class Autocorrector
         }
 
         var word = AutocorrectRules.LastWord(typed);
-        if (word.Length == 0 || neverCorrect.Contains(word)) return false;
+        if (word.Length == 0 || personal.IsNeverCorrect(word)) return false;
 
         var match = settings.AutocorrectEnabled ? rules.MatchAtEnd(typed) : null;
         switch (match)
@@ -295,7 +325,7 @@ public sealed class Autocorrector
         new InputBatch().Backspace(AutocorrectRules.Backspaces(applied)).Text(fix.Original).SendFromHook();
         ReplaceTypedSuffix(applied.Length, fix.Original);
         var word = AutocorrectRules.LastWord(fix.Original);
-        if (word.Length > 0) neverCorrect.Add(word);
+        if (word.Length > 0) personal.AddNeverCorrect(word);
         Note("Undid a correction; that word won't be corrected again");
         RaiseTextChanged();
     }
@@ -304,7 +334,7 @@ public sealed class Autocorrector
 
     private void StartModelCheck(string word, List<string>? candidates, double margin, char ending)
     {
-        if (!settings.AiTypoFix || !engine.IsReady || word.Length < 3 || neverCorrect.Contains(word)
+        if (!settings.AiTypoFix || !engine.IsReady || word.Length < 3 || personal.IsNeverCorrect(word)
             || !word.All(c => char.IsLetter(c) || c == '\'')) return;
         // Leave alone ALL-CAPS words and, for dictionary checks, names.
         var letters = word.Where(char.IsLetter).ToList();
@@ -359,6 +389,9 @@ public sealed class Autocorrector
             Context = ctx.TextBefore[..^tail.Length],
             AppName = settings.UseAppContext ? ctx.AppName : null,
             WindowTitle = settings.UseAppContext ? ctx.WindowTitle : null,
+            ScreenText = screen.TextFor(ctx),
+            Profile = personal.PromptProfile,
+            Examples = samples.Examples(ctx.AppId, ctx.WindowTitle),
             Candidates = [check.Word, .. options],
         };
         // List entries that are real words are known mistakes; for everything
@@ -409,6 +442,8 @@ public sealed class Autocorrector
             ReplaceTypedSuffix(check.Word.Length + tail.Length, replacement + tail);
             if (check.TypedSince.Length == 0) lastFix = (check.Word, replacement, check.Ending);
         }
+        // It was a typo, not one of the user's own words.
+        personal.ForgetObservation(check.Word);
         RecordFix(byModel: true);
     }
 
@@ -416,6 +451,7 @@ public sealed class Autocorrector
 
     private void RecordFix(bool byModel)
     {
+        stats.RecordCorrection();
         Note(byModel ? "Fixed a typo using the language model" : "Fixed a misspelling");
         RaiseTextChanged();
     }

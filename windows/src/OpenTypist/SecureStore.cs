@@ -36,6 +36,11 @@ public sealed class SecureStore(string? directory = null)
         catch (IOException) { return null; }
     }
 
+    public void Delete(string name)
+    {
+        try { File.Delete(Path.Combine(Directory, name)); } catch (IOException) { }
+    }
+
     public void Save<T>(string name, T value)
     {
         var path = Path.Combine(Directory, name);

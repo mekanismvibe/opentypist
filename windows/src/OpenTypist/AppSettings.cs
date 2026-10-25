@@ -47,6 +47,27 @@ public sealed class AppSettings
     public bool AiTypoFix { get; set; } = true;
     /// Expand snippets.
     public bool TextReplacementsEnabled { get; set; } = true;
+    /// Put the profile at the top of every prompt.
+    public bool UseProfile { get; set; } = true;
+    /// Learn names, words, spelling and greetings from what the user types.
+    public bool LearnHabits { get; set; } = true;
+    /// Keep encrypted samples of the user's writing as style examples (opt-in).
+    public bool KeepWritingSamples { get; set; }
+    /// Read the visible text of the window with OCR and add it to the prompt.
+    /// Off by default: Windows has no permission prompt to ask first.
+    public bool UseScreenContext { get; set; }
+    /// Free the model's memory after `IdleUnloadMinutes` without typing.
+    public bool UnloadWhenIdle { get; set; }
+    public int IdleUnloadMinutes { get; set; } = 15;
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public PowerBehavior BatteryBehavior { get; set; } = PowerBehavior.Normal;
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public PowerBehavior LowPowerBehavior { get; set; } = PowerBehavior.Normal;
+    /// Model used on battery / in battery saver when set to "smaller model".
+    public string SmallerModelId { get; set; } = "qwen3-1.7b";
+    /// Look for a new release on GitHub once a day.
+    public bool CheckForUpdates { get; set; } = true;
+    public DateTime? LastUpdateCheck { get; set; }
 
     public AcceptKeys AcceptKeysFor(string? appId) =>
         appId is not null && AppAcceptKeys.TryGetValue(appId, out var keys) ? keys : AcceptKeys;

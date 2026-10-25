@@ -14,6 +14,10 @@ public sealed class CompletionController
     private readonly EngineService engine;
     private readonly FocusReader reader;
     private readonly AppSettings settings;
+    private readonly Personalization personal;
+    private readonly WritingSamples samples;
+    private readonly ScreenContext screen;
+    private readonly Stats stats;
     private readonly OverlayWindow overlay = new();
     private readonly Dispatcher dispatcher;
 
@@ -35,11 +39,16 @@ public sealed class CompletionController
     /// Called with text inserted by accepting a suggestion.
     public event Action<string>? Accepted;
 
-    public CompletionController(EngineService engine, FocusReader reader, AppSettings settings)
+    public CompletionController(EngineService engine, FocusReader reader, AppSettings settings,
+        Personalization personal, WritingSamples samples, ScreenContext screen, Stats stats)
     {
         this.engine = engine;
         this.reader = reader;
         this.settings = settings;
+        this.personal = personal;
+        this.samples = samples;
+        this.screen = screen;
+        this.stats = stats;
         dispatcher = Dispatcher.CurrentDispatcher;
         refreshTimer = new DispatcherTimer(DispatcherPriority.Input, dispatcher);
         refreshTimer.Tick += (_, _) =>
@@ -173,6 +182,7 @@ public sealed class CompletionController
         }
         HideOverlay();
         TextInserter.Type(inserted);
+        stats.RecordAccepted(inserted);
         Accepted?.Invoke(inserted);
         var tail = suggestion.AnchorTail + suggestion.Text[..Math.Max(0, consumedBefore)] + inserted;
         // Text goes out a word at a time (see InputBatch), so allow ~0.8 s.
@@ -212,6 +222,7 @@ public sealed class CompletionController
         if (result.Context is not FocusContext ctx) { Skip(result.Failure ?? "No focused text field"); return; }
         lastContext = ctx;
         if (settings.IsDisabled(ctx.AppId)) { Skip($"{ctx.AppName}: turned off for this app"); return; }
+        samples.Observe(ctx);
         if (ctx.Caret is not Rect caret) { Skip($"{ctx.AppName}: the app doesn't report where the caret is"); return; }
 
         var before = ctx.TextBefore;
@@ -256,6 +267,9 @@ public sealed class CompletionController
             TextBefore = before,
             AppName = settings.UseAppContext ? ctx.AppName : null,
             WindowTitle = settings.UseAppContext ? ctx.WindowTitle : null,
+            ScreenText = screen.TextFor(ctx),
+            Profile = personal.PromptProfile,
+            Examples = samples.Examples(ctx.AppId, ctx.WindowTitle),
             Length = midLine ? CompletionLength.Short : settings.Length,
             MinProbability = settings.Confidence.MinProbability(),
             WordMinProbability = settings.Confidence.WordMinProbability(),
@@ -270,7 +284,11 @@ public sealed class CompletionController
             if (!settings.Enabled || generation != refreshGeneration) return;
             suggestion = new Suggestion(before, text, ctx.ProcessId);
             Show(text, ctx, caret);
-            firstShownMs ??= started.ElapsedMilliseconds;
+            if (firstShownMs is null)
+            {
+                firstShownMs = started.ElapsedMilliseconds;
+                stats.RecordShown();
+            }
         }
         engine.Complete(request, text =>
         {
