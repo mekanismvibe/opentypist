@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- Windows 10 1809+; the SDK projection is for Windows.Media.Ocr (screen context). -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RootNamespace>OpenTypist</RootNamespace>
+    <AssemblyName>OpenTypist</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <StartupObject>OpenTypist.Program</StartupObject>
+    <!-- Same version as the Mac app (Resources/Info.plist), unless
+         build.ps1 -Version (a release tag) says otherwise. -->
+    <InfoPlist>$(MSBuildThisFileDirectory)..\..\..\Resources\Info.plist</InfoPlist>
+    <Version Condition="'$(Version)' == '' or '$(Version)' == '1.0.0'">$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText($(InfoPlist))), 'CFBundleShortVersionString&lt;/key&gt;\s*&lt;string&gt;([^&lt;]+)').Groups[1].Value)</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Product>OpenTypist</Product>
+    <Description>OpenTypist</Description>
+    <Copyright>MIT License</Copyright>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- DPI awareness is in app.manifest for WPF; the WinForms analyzer
+         (tray icon only) would rather see it in code. -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(AppIconPath)' != '' and Exists('$(AppIconPath)')">
+    <ApplicationIcon>$(AppIconPath)</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- WinForms is only used for the tray icon. Its global usings would make
+       Application, MessageBox etc. ambiguous with WPF's, so drop them. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <Using Include="System.IO" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\OpenTypist.Core\OpenTypist.Core.csproj" />
+    <PackageReference Include="Interop.UIAutomationClient" Version="10.19041.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- The Wikipedia misspellings list is shared with the Mac app (Resources/autocorrect, CC BY-SA). -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\..\..\Resources\autocorrect\*" Link="autocorrect\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+  <!-- llama.dll, ggml*.dll and opentypist_native.dll from windows/build.ps1. -->
+  <PropertyGroup>
+    <NativeDir Condition="'$(NativeDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\build\wn\runtime\</NativeDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(NativeDir)*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(AppIconPath)" Condition="'$(AppIconPath)' != '' and Exists('$(AppIconPath)')" Link="AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+</Project>

@@ -33,3 +33,40 @@ jobs:
 
       - name: Self-test (no model)
         run: .build/release/OpenTypist --selftest-offline
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Pinned llama.cpp revision
+        id: llama
+        run: Add-Content -Encoding ascii $env:GITHUB_OUTPUT "rev=$(git rev-parse HEAD:vendor/llama.cpp)"
+
+      # Only the built DLLs are cached, not the CMake build tree, so a new
+      # runner image (compiler) can't break it.
+      - name: Cache native DLLs
+        id: native
+        uses: actions/cache@v4
+        with:
+          path: build/wn/runtime
+          key: native-cpu-${{ runner.os }}-${{ steps.llama.outputs.rev }}-${{ hashFiles('windows/native/**') }}
+
+      - name: Build app (CPU only)
+        run: |
+          if ('${{ steps.native.outputs.cache-hit }}' -eq 'true') { .\windows\build.ps1 -NoVulkan -SkipNative }
+          else { .\windows\build.ps1 -NoVulkan }
+
+      - name: Self-test (no model)
+        run: |
+          .\build\windows\OpenTypist\OpenTypist.exe --selftest-offline | Out-Host
+          exit $LASTEXITCODE
