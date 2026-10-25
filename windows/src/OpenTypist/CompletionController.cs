@@ -147,6 +147,8 @@ public sealed class CompletionController
     {
         var current = visible;
         if (chunk.Length == 0 || suggestion is null || current is null) return;
+        // Accepting what's visible ends a suggestion that's still streaming.
+        engine.CancelAll();
         int consumedBefore = suggestion.Text.Length - current.Text.Length;
         var inserted = chunk;
         // Finishing the suggestion: optionally add a space so typing can go on.
@@ -245,6 +247,15 @@ public sealed class CompletionController
         };
         long readMs = started.ElapsedMilliseconds;
         AppStatus.Log($"refresh {generation}: {before.Length} chars before the caret, asking the model");
+        long? firstShownMs = null;
+        // Show each complete word as soon as it exists, then the final text.
+        void Present(string text)
+        {
+            if (!settings.Enabled || generation != refreshGeneration) return;
+            suggestion = new Suggestion(before, text, ctx.ProcessId);
+            Show(text, ctx, caret);
+            firstShownMs ??= started.ElapsedMilliseconds;
+        }
         engine.Complete(request, text =>
         {
             if (!settings.Enabled || generation != refreshGeneration)
@@ -253,15 +264,16 @@ public sealed class CompletionController
                 return;
             }
             long ms = started.ElapsedMilliseconds;
-            if (text is null)
+            if (text is not null)
+            {
+                Present(text);
+                AppStatus.Note($"{ctx.AppName}: suggestion shown after {firstShownMs ?? ms} ms, complete after {ms} ms (reading the field {readMs} ms)");
+            }
+            else if (firstShownMs is null)
             {
                 AppStatus.Note($"{ctx.AppName}: the model had no good suggestion ({ms} ms, reading the field {readMs} ms)");
-                return;
             }
-            suggestion = new Suggestion(before, text, ctx.ProcessId);
-            Show(text, ctx, caret);
-            AppStatus.Note($"{ctx.AppName}: showing a suggestion ({ms} ms, reading the field {readMs} ms)");
-        });
+        }, Present);
     }
 
     // Overlay

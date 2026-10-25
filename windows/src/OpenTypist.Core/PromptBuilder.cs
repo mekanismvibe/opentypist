@@ -222,6 +222,35 @@ public static class PromptBuilder
         return words;
     }
 
+    /// The beginning of `text` up to the end of its first complete word, once
+    /// that word has ended (a later word or punctuation has begun), cleaned
+    /// like a final suggestion. null while the first word may still grow.
+    public static string? FirstCompleteWord(string text, Prompt prompt)
+    {
+        var words = SplitWords(text);
+        // The first word is complete once a second one has started, or once
+        // the text after it has punctuation or whitespace.
+        bool complete = words.Count >= 2 || (words.Count == 1 && text.Length > 0 && (char.IsWhiteSpace(text[^1]) || char.IsPunctuation(text[^1])));
+        return complete ? Clean(words[0], prompt, 1, false) : null;
+    }
+
+    /// What to show while a suggestion is still being generated: only the
+    /// words that are complete (a half-generated word may still change),
+    /// cleaned like a final suggestion. Every token generated so far already
+    /// passed the confidence filter.
+    public static string? StreamingText(string text, Prompt prompt, int maxWords, string textAfter)
+    {
+        var words = SplitWords(text);
+        if (text.Length > 0 && !char.IsWhiteSpace(text[^1]) && !char.IsPunctuation(text[^1]) && words.Count > 0) words.RemoveAt(words.Count - 1);
+        if (words.Count == 0 || Clean(string.Concat(words), prompt, maxWords, false) is not string shown) return null;
+        if (textAfter.Length > 0)
+        {
+            if (FitBefore(textAfter, shown) is not string fitted) return null;
+            shown = fitted;
+        }
+        return shown;
+    }
+
     /// Word count of the model output used as an early stop signal.
     public static bool ShouldStop(string text, int maxWords)
     {

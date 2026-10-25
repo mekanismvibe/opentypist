@@ -119,14 +119,20 @@ public sealed class EngineService : IDisposable
     private bool IsLatest(int id) => Volatile.Read(ref latestId) == id;
 
     /// Calls `completion` with the cleaned suggestion, or null if there is
-    /// nothing worth showing. Not called if superseded.
-    public void Complete(Request request, Action<string?> completion)
+    /// nothing worth showing. Not called if superseded. `onPartial` streams
+    /// the suggestion as it grows, one complete word at a time; `completion`
+    /// then delivers the final text.
+    public void Complete(Request request, Action<string?> completion, Action<string>? onPartial = null)
     {
         int id = CancelAll();
         queue.Add(() =>
         {
             if (!IsLatest(id) || !engine.IsLoaded) return;
-            var text = Run(engine, request, () => IsLatest(id), out bool cancelled);
+            Action<string>? partial = onPartial is null ? null : text => Post(() =>
+            {
+                if (IsLatest(id)) onPartial(text);
+            });
+            var text = Run(engine, request, () => IsLatest(id), out bool cancelled, partial);
             if (cancelled) return;
             Post(() =>
             {
@@ -137,13 +143,24 @@ public sealed class EngineService : IDisposable
 
     /// The whole suggestion pipeline for one request: prompt, generation,
     /// confidence cut, clean-up and the mid-line fit. Shared with --selftest.
-    public static string? Run(LlamaEngine engine, Request request, Func<bool> shouldContinue, out bool cancelled)
+    /// `onPartial` gets each new streaming text on the engine thread.
+    public static string? Run(LlamaEngine engine, Request request, Func<bool> shouldContinue, out bool cancelled,
+                              Action<string>? onPartial = null)
     {
         var prompt = PromptBuilder.Build(request.TextBefore, request.AppName, request.WindowTitle, request.ScreenText,
                                          request.Profile, request.Examples);
         int maxWords = request.Length.MaxWords();
-        var output = engine.Complete(prompt.Text, request.Length.MaxTokens(), prompt.HealLastToken, shouldContinue,
-                                     t => PromptBuilder.ShouldStop(t, maxWords), request.MinProbability, request.WordMinProbability);
+        string? lastPartial = null;
+        var output = engine.Complete(prompt.Text, request.Length.MaxTokens(), prompt.HealLastToken, shouldContinue, text =>
+        {
+            if (onPartial is not null && PromptBuilder.StreamingText(text, prompt, maxWords, request.TextAfter) is string partial
+                && partial != lastPartial)
+            {
+                lastPartial = partial;
+                onPartial(partial);
+            }
+            return PromptBuilder.ShouldStop(text, maxWords);
+        }, request.MinProbability, request.WordMinProbability);
         cancelled = output is null;
         if (output is null) return null;
         var confident = PromptBuilder.ConfidentText(output.Tokens, output.HitTokenLimit, request.MinProbability, request.WordMinProbability);
