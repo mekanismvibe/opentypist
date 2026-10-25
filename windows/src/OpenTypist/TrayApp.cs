@@ -23,7 +23,13 @@ public sealed class TrayApp : IDisposable
     private CompletionController? controller;
     private Autocorrector? autocorrector;
     private TextReplacements? replacements;
-    private readonly NeverCorrect neverCorrect = new();
+    // Created in Start, on the UI thread (they post changes to it).
+    private Personalization personal = null!;
+    private WritingSamples samples = null!;
+    private ScreenContext screen = null!;
+    private readonly Stats stats = new(Path.Combine(AppSettings.DataDirectory, "stats.json"));
+    private PowerMonitor power = null!;
+    private Updater updater = null!;
     private Forms.NotifyIcon? notifyIcon;
     private Icon? activeIcon, inactiveIcon;
     private SettingsWindow? settingsWindow;
@@ -36,6 +42,13 @@ public sealed class TrayApp : IDisposable
     /// The model file currently loaded (or loading).
     private string? loadedModelPath;
     private bool loadedOnGpu;
+    /// Unloaded after a stretch without typing; reloads on the next keystroke.
+    private bool sleeping;
+    /// Paused by the battery / battery saver setting.
+    private bool powerPaused;
+    /// Last keystroke (UTC ticks), written by the hook thread.
+    private long lastTypingTicks = DateTime.UtcNow.Ticks;
+    private DispatcherTimer? idleTimer;
     private bool shutDown;
 
     public AppSettings Settings => settings;
@@ -44,7 +57,11 @@ public sealed class TrayApp : IDisposable
     public bool HookRunning => hook.IsRunning;
     public Autocorrector? Autocorrector => autocorrector;
     public TextReplacements? Replacements => replacements;
-    public NeverCorrect NeverCorrect => neverCorrect;
+    public Personalization Personal => personal;
+    public WritingSamples Samples => samples;
+    public Stats Stats => stats;
+    public PowerMonitor Power => power;
+    public Updater Updater => updater;
     /// The app the user was in before opening the menu or Settings.
     public (string Id, string Name)? LastExternalApp => lastExternalApp;
 
@@ -55,9 +72,14 @@ public sealed class TrayApp : IDisposable
 
     public void Start(bool showSettings)
     {
-        controller = new CompletionController(engine, reader, settings);
+        personal = new Personalization(settings);
+        samples = new WritingSamples(settings);
+        screen = new ScreenContext(settings);
+        power = new PowerMonitor(settings);
+        updater = new Updater(settings);
+        controller = new CompletionController(engine, reader, settings, personal, samples, screen, stats);
         replacements = new TextReplacements(settings);
-        autocorrector = new Autocorrector(engine, reader, settings, replacements, neverCorrect);
+        autocorrector = new Autocorrector(engine, reader, settings, replacements, personal, samples, screen, stats);
         controller.Accepted += autocorrector.NoteInserted;
         autocorrector.TextChanged += controller.TextChangedExternally;
 
@@ -67,6 +89,7 @@ public sealed class TrayApp : IDisposable
         var corrector = autocorrector;
         hook.OnKeyDown = e =>
         {
+            NoteTyping();
             if (completion.TryAcceptOnHookThread(e)) return true;
             if (corrector.HandleKeyDown(e, ForegroundAppId())) return true;
             completion.PostKeyDown(e);
@@ -102,10 +125,21 @@ public sealed class TrayApp : IDisposable
         settings.Changed += () =>
         {
             controller.Dismiss();
+            // Turning the idle unload off wakes the model up.
+            if (sleeping && !settings.UnloadWhenIdle) sleeping = false;
             LoadModel();
             UpdateIcon();
         };
         AppStatus.Changed += UpdateIcon;
+        // Battery or battery saver changed: maybe switch model or pause.
+        power.Changed += () =>
+        {
+            LoadModel();
+            UpdateIcon();
+        };
+        power.Start();
+        StartIdleTimer();
+        updater.Changed += UpdateIcon;
 
         CreateTrayIcon();
         showSettingsEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ShowSettingsEventName);
@@ -118,11 +152,12 @@ public sealed class TrayApp : IDisposable
         }
         LoadModel();
         UpdateIcon();
+        updater.StartAutomaticChecks();
 
         if (models.ActiveModelPath(settings.SelectedModelId, settings.CustomModelPath) is null)
         {
             // Nothing downloads until the user picks a model.
-            ShowSettings(modelTab: true);
+            ShowSettings("Model");
             notifyIcon?.ShowBalloonTip(5000, "OpenTypist", "Choose a model to start getting suggestions.", Forms.ToolTipIcon.Info);
         }
         else if (showSettings)
@@ -131,22 +166,85 @@ public sealed class TrayApp : IDisposable
         }
     }
 
+    /// For Settings snapshots (--snapshot-settings): the data objects only;
+    /// no hooks, tray icon, model or update checks.
+    public void StartPreview()
+    {
+        personal = new Personalization(settings);
+        samples = new WritingSamples(settings);
+        screen = new ScreenContext(settings);
+        power = new PowerMonitor(settings);
+        updater = new Updater(settings);
+        replacements = new TextReplacements(settings);
+        autocorrector = new Autocorrector(engine, reader, settings, replacements, personal, samples, screen, stats);
+    }
+
     // Model lifecycle
 
-    /// Loads the selected model (or a custom .gguf) unless it's already loaded.
+    /// Loads the model that fits the current situation: the selected one (or
+    /// a custom .gguf), the smaller one on battery or in battery saver if so
+    /// configured, or none while paused or sleeping.
     public void LoadModel(bool force = false)
     {
+        var behavior = power.Behavior;
+        bool wasPaused = powerPaused;
+        powerPaused = behavior == PowerBehavior.Pause;
+        if (powerPaused)
+        {
+            controller?.Dismiss();
+            if (loadedModelPath is not null || engine.CurrentState.Status != EngineService.Status.Idle) engine.Unload();
+            loadedModelPath = null;
+            if (!wasPaused) AppStatus.Note($"Suggestions paused {power.Situation}");
+            return;
+        }
         var path = models.ActiveModelPath(settings.SelectedModelId, settings.CustomModelPath);
+        if (behavior == PowerBehavior.SmallerModel)
+        {
+            if (ModelCatalog.Model(settings.SmallerModelId) is { } small && models.IsDownloaded(small)) path = models.FileFor(small);
+            else AppStatus.Note("The smaller model isn't downloaded; using the usual one");
+        }
         if (path is null)
         {
             if (loadedModelPath is not null) engine.Unload();
             loadedModelPath = null;
             return;
         }
+        if (sleeping) return;
         if (!force && path == loadedModelPath && loadedOnGpu == settings.UseGpu && engine.CurrentState.Status != EngineService.Status.Idle) return;
         loadedModelPath = path;
         loadedOnGpu = settings.UseGpu;
         engine.Load(path, settings.UseGpu);
+    }
+
+    /// Hook thread: a key went down.
+    private void NoteTyping()
+    {
+        Interlocked.Exchange(ref lastTypingTicks, DateTime.UtcNow.Ticks);
+        if (!Volatile.Read(ref sleeping) || settings.IsDisabled(ForegroundAppId())) return;
+        dispatcher.BeginInvoke(() =>
+        {
+            if (!sleeping) return;
+            sleeping = false;
+            AppStatus.Note("Loading the model again");
+            LoadModel();
+            UpdateIcon();
+        });
+    }
+
+    private void StartIdleTimer()
+    {
+        idleTimer = new DispatcherTimer(TimeSpan.FromSeconds(30), DispatcherPriority.Background, (_, _) =>
+        {
+            var lastTyping = new DateTime(Interlocked.Read(ref lastTypingTicks), DateTimeKind.Utc);
+            if (sleeping || !engine.IsReady || !PowerRules.ShouldUnloadForIdle(settings.UnloadWhenIdle, settings.IdleUnloadMinutes, lastTyping, DateTime.UtcNow)) return;
+            sleeping = true;
+            controller?.Dismiss();
+            engine.Unload();
+            loadedModelPath = null;
+            AppStatus.Note($"Unloaded the model after {settings.IdleUnloadMinutes} minute{(settings.IdleUnloadMinutes == 1 ? "" : "s")} without typing");
+            UpdateIcon();
+        }, dispatcher);
+        idleTimer.Start();
     }
 
     public string LoadedModelName
@@ -172,6 +270,8 @@ public sealed class TrayApp : IDisposable
             case ModelManager.Phase.Failed when loadedModelPath is null:
                 return $"Download failed: {download.Message}";
         }
+        if (powerPaused) return $"Paused {power.Situation} to save battery";
+        if (sleeping) return "Model unloaded to save memory; loads when you type";
         var state = engine.CurrentState;
         return state.Status switch
         {
@@ -194,12 +294,14 @@ public sealed class TrayApp : IDisposable
         AppStatus.Log($"foreground changed: {ClassName(hwnd)}");
         controller?.Dismiss();
         autocorrector?.Reset();
+        samples?.Flush();
         if (hwnd == IntPtr.Zero) return;
         GetWindowThreadProcessId(hwnd, out int pid);
         if (pid == Environment.ProcessId || ClassName(hwnd) == "Shell_TrayWnd") return;
         var path = ProcessImagePath(pid);
         if (path is null) return;
         lastExternalApp = (Path.GetFileName(path).ToLowerInvariant(), FocusReader.DisplayName(path));
+        autocorrector?.SetCurrentApp(lastExternalApp.Value.Id, lastExternalApp.Value.Name);
     }
 
     // Tray icon and menu
@@ -285,8 +387,21 @@ public sealed class TrayApp : IDisposable
         }));
 
         menu.Items.Add(new Forms.ToolStripSeparator());
+        foreach (var line in new[]
+        {
+            $"Today: {stats.WordsAcceptedToday} words accepted",
+            $"All time: {stats.WordsAccepted} words, {stats.KeystrokesSaved} keystrokes saved",
+        })
+        {
+            menu.Items.Add(new Forms.ToolStripMenuItem(line) { Enabled = false });
+        }
+
+        menu.Items.Add(new Forms.ToolStripSeparator());
         if (models.IsDownloading) menu.Items.Add(Item("Cancel Model Download", false, models.CancelDownload));
-        menu.Items.Add(Item("Choose Model...", false, () => ShowSettings(modelTab: true)));
+        if (updater.Available is { } release) menu.Items.Add(Item($"Update to OpenTypist {release.Version}...", false, () => ShowSettings("General")));
+        else menu.Items.Add(Item("Check for Updates...", false, () => updater.Check(userInitiated: true)));
+        if (personal.Profile.Proposal is not null) menu.Items.Add(Item("Profile Update Ready...", false, () => ShowSettings("Personal")));
+        menu.Items.Add(Item("Choose Model...", false, () => ShowSettings("Model")));
         menu.Items.Add(Item("Settings...", false, () => ShowSettings()));
         menu.Items.Add(Item("Quit OpenTypist", false, Quit));
     }
@@ -298,7 +413,8 @@ public sealed class TrayApp : IDisposable
         return item;
     }
 
-    public void ShowSettings(bool modelTab = false)
+    /// Opens Settings, on the tab with that header if given.
+    public void ShowSettings(string? tab = null)
     {
         if (settingsWindow is null)
         {
@@ -306,7 +422,7 @@ public sealed class TrayApp : IDisposable
             settingsWindow.Closed += (_, _) => settingsWindow = null;
         }
         settingsWindow.Show();
-        if (modelTab) settingsWindow.SelectModelTab();
+        if (tab is not null) settingsWindow.SelectTab(tab);
         if (settingsWindow.WindowState == WindowState.Minimized) settingsWindow.WindowState = WindowState.Normal;
         settingsWindow.Activate();
     }
@@ -320,6 +436,11 @@ public sealed class TrayApp : IDisposable
         shutDown = true;
         controller?.Dismiss();
         hook.Dispose();
+        samples?.Flush();
+        personal?.Flush();
+        stats.Flush();
+        power?.Dispose();
+        idleTimer?.Stop();
         if (foregroundHook != IntPtr.Zero) UnhookWinEvent(foregroundHook);
         foregroundHook = IntPtr.Zero;
         models.CancelDownload();

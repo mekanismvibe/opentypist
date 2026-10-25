@@ -16,6 +16,10 @@ public static class Program
         if (args.Contains("--selftest")) { AttachConsole(); return SelfTest.Run(args); }
         if (args.Contains("--download")) { AttachConsole(); return SelfTest.Download(args); }
         if (args.Contains("--calibrate")) { AttachConsole(); return SelfTest.Calibrate(args); }
+        if (args.Contains("--update-test")) { AttachConsole(); return SelfTest.UpdateTest(args); }
+        if (args.Contains("--snapshot-settings")) { AttachConsole(); return SelfTest.SnapshotSettings(args); }
+        // The new version, run from the download folder, swapping itself in.
+        if (args.Contains("--finish-update")) return Updater.FinishUpdate(args);
 
         // One instance; opening the app again shows Settings, the way back in
         // when the tray icon is hidden in the overflow area.
@@ -39,7 +43,11 @@ public static class Program
         // they were created on; make that the UI thread.
         SynchronizationContext.SetSynchronizationContext(new System.Windows.Threading.DispatcherSynchronizationContext());
         using var tray = new TrayApp(app);
-        app.Startup += (_, _) => tray.Start(showSettings: args.Contains("--settings"));
+        app.Startup += (_, _) =>
+        {
+            tray.Start(showSettings: args.Contains("--settings"));
+            Updater.CleanUpAfterUpdate(args);
+        };
         app.Exit += (_, _) => tray.Shutdown();
         return app.Run();
     }
