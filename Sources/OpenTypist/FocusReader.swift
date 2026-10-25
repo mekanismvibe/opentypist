@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon
 
 /// Font and color of the text just before the caret, so the ghost text can
 /// match what the user is typing.
@@ -19,6 +20,9 @@ struct FocusContext {
     let textBefore: String
     /// Text after the caret up to the end of the line.
     let textAfterOnLine: String
+    /// macOS's own inline prediction, the gray text it shows right after the
+    /// caret. Not part of `textAfterOnLine`: it isn't the user's text.
+    let hostPrediction: String
     /// Caret rectangle in Cocoa screen coordinates (origin bottom-left).
     let caretRect: CGRect?
     let style: TextStyle
@@ -37,6 +41,7 @@ enum FocusFailure: Error, CustomStringConvertible {
     case noTextSelection(app: String, role: String)
     case textSelected(app: String)
     case unreadableText(app: String, role: String)
+    case composing(app: String)
 
     var description: String {
         switch self {
@@ -46,6 +51,7 @@ enum FocusFailure: Error, CustomStringConvertible {
         case .noTextSelection(let app, let role): return "\(app): focused element (\(role)) doesn't report a caret"
         case .textSelected(let app): return "\(app): text is selected"
         case .unreadableText(let app, let role): return "\(app): couldn't read the text of \(role)"
+        case .composing(let app): return "\(app): waiting for the input method to finish"
         }
     }
 }
@@ -119,6 +125,24 @@ enum FocusReader {
             before = b
             after = string(element, location: caret, length: total >= 0 ? min(200, total - caret) : 200) ?? ""
         }
+        // Marked text is either an input method still composing, or macOS's
+        // inline prediction: the word being typed is marked, and the part
+        // after the caret is the gray text it suggests ("apprec|iate"). That
+        // part isn't the user's text.
+        var hostPrediction = ""
+        if let markedValue: AXValue = attribute(element, "AXTextInputMarkedRange") {
+            var marked = CFRange()
+            if AXValueGetValue(markedValue, .cfRange, &marked), marked.length > 0 {
+                guard !inputMethodActive() else { return .failure(.composing(app: appName)) }
+                let ns = after as NSString
+                let end = min(marked.location + marked.length - caret, ns.length)
+                if marked.location <= caret, end > 0 {
+                    let range = NSRange(location: 0, length: end)
+                    hostPrediction = ns.substring(with: range)
+                    after = ns.substring(from: end)
+                }
+            }
+        }
         if let newline = after.firstIndex(where: { $0.isNewline }) {
             after = String(after[..<newline])
         }
@@ -143,6 +167,7 @@ enum FocusReader {
             role: role,
             textBefore: before,
             textAfterOnLine: after,
+            hostPrediction: hostPrediction,
             caretRect: caretRect(element, caret: caret, previousIsNewline: previousIsNewline),
             style: textStyle(element, caret: caret),
             element: element,
@@ -235,6 +260,15 @@ enum FocusReader {
     }
 
     // MARK: - Helpers
+
+    /// Whether the keyboard input is an input method (Japanese, Chinese,
+    /// Korean…) rather than a plain layout; only then is marked text a
+    /// composition in progress.
+    private static func inputMethodActive() -> Bool {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+              let type = TISGetInputSourceProperty(source, kTISPropertyInputSourceType) else { return false }
+        return Unmanaged<CFString>.fromOpaque(type).takeUnretainedValue() != kTISTypeKeyboardLayout
+    }
 
     /// Chromium and Electron only build their accessibility tree on request.
     private static func exposeAccessibilityTree(_ app: AXUIElement, pid: pid_t) {

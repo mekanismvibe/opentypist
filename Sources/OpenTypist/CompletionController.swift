@@ -238,12 +238,31 @@ final class CompletionController {
     private func show(_ text: String, context: FocusContext, caret: CGRect) {
         visibleText = text
         let keys = settings.acceptKeys(for: context.bundleID)
+        var shown = text
+        var anchor = caret
         // Mid-line, ghost text would sit on top of the text after the caret,
         // so the suggestion goes in a small bubble just below the line.
-        if !context.textAfterOnLine.trimmingCharacters(in: .whitespaces).isEmpty {
-            overlay.show(text, at: caret, style: context.style, wrap: nil, hint: keys.word.hintLabel, bubble: true)
+        var bubble = !context.textAfterOnLine.trimmingCharacters(in: .whitespaces).isEmpty
+        // macOS draws its own prediction right after the caret. When ours
+        // carries on from it, draw only the rest, after its gray text; when
+        // they disagree, keep out of its way in the bubble.
+        let prediction = context.hostPrediction
+        if !bubble, !prediction.isEmpty {
+            if text.hasPrefix(prediction) {
+                shown = String(text.dropFirst(prediction.count))
+                // Nothing beyond what macOS already shows: leave it to macOS.
+                guard shown.contains(where: { !$0.isWhitespace }) else { return hideOverlay() }
+                // Ghost text starts at the caret's right edge; macOS's starts at its left.
+                let font = OverlayWindow.font(for: context.style, caret: caret)
+                anchor.origin.x += (prediction as NSString).size(withAttributes: [.font: font]).width - caret.width
+            } else {
+                bubble = true
+            }
+        }
+        if bubble {
+            overlay.show(shown, at: anchor, style: context.style, wrap: nil, hint: keys.word.hintLabel, bubble: true)
         } else {
-            overlay.show(text, at: caret, style: context.style, wrap: wrapGuide(for: text, context: context, caret: caret),
+            overlay.show(shown, at: anchor, style: context.style, wrap: wrapGuide(for: shown, context: context, caret: anchor),
                          hint: keys.word.hintLabel)
         }
     }
