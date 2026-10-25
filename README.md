@@ -1,7 +1,8 @@
 # OpenTypist
 
-Open source, on-device autocomplete for macOS. As you type in almost any app
-(Mail, Messages, Slack, Notes, browsers…), OpenTypist predicts the next few
+Open source, on-device autocomplete for macOS and Windows. As you type in
+almost any app (Mail, Outlook, Messages, Slack, Notes, Notepad, browsers…),
+OpenTypist predicts the next few
 words with a local language model and shows them right after the caret as
 ghost text: the field's own font in a faded version of its text color.
 
@@ -14,7 +15,8 @@ Tab already does something can get their own keys (Settings → Apps), for
 example → and ⌥→ in Slack.
 
 Everything runs locally with [llama.cpp](https://github.com/ggml-org/llama.cpp)
-on the GPU (Metal). Nothing you type leaves your Mac, password fields are never
+on the GPU (Metal on a Mac, Vulkan on Windows, or the CPU when there's no
+suitable GPU). Nothing you type leaves your computer, password fields are never
 read, sign-in and verification fields are left alone, and the only data stored
 is a count of accepted words.
 
@@ -211,9 +213,12 @@ Input Monitoring.
 
 ## Install
 
-Download the DMG from the [latest release](https://github.com/mekanismvibe/opentypist/releases/latest),
-open it and drag OpenTypist into Applications. Requires Apple silicon and
-macOS 14 or later.
+Both versions are on the [latest release](https://github.com/mekanismvibe/opentypist/releases/latest).
+
+### Mac
+
+Download `OpenTypist-<version>.dmg`, open it and drag OpenTypist into
+Applications. Requires Apple silicon and macOS 14 or later.
 
 Release builds aren't signed with an Apple Developer ID yet, so the first time
 you open the app macOS refuses: go to System Settings → Privacy & Security,
@@ -226,7 +231,25 @@ for Updates…** in the menu). Installing an update downloads the DMG, verifies
 it against the published SHA-256, checks the app's bundle ID, version and code
 signature, swaps it in and relaunches.
 
+### Windows
+
+Download `OpenTypist-<version>-win-x64.zip`, extract it to a folder you keep
+(don't run it from inside the zip) and open `OpenTypist.exe`. It lives in the
+notification area (the tray); pick a model to download when it asks. Requires
+64-bit Windows 10 (1809) or later, and uses the graphics card through Vulkan
+when there is one, otherwise the CPU. Windows needs no special permissions.
+
+The build isn't signed with a code-signing certificate yet, so the first time
+you open it SmartScreen says "Windows protected your PC": click **More info**,
+then **Run anyway**. After that it updates itself from the same GitHub
+releases (tray icon → Check for Updates…), checking the zip against its
+published SHA-256 before swapping it in.
+
 ## Requirements for building
+
+The Mac app (the Windows app's requirements and build steps are in
+[windows/README.md](windows/README.md)):
+
 
 - A Mac with Apple silicon
 - Swift 5.9+ (the Xcode Command Line Tools are enough)
@@ -250,10 +273,11 @@ result is a single 12 MB app with no dependencies beyond macOS. Copy it to
 ### Releases
 
 Pushing a tag like `v0.3.0` runs `.github/workflows/release.yml`: it builds
-the app at that version, runs the offline self-test, makes the DMG and
-publishes a GitHub release with the DMG and its checksum, which the in-app
-updater then offers to everyone. Every push and pull request is built and
-tested by `.github/workflows/ci.yml`. Adding Developer ID secrets to the
+the Mac app at that version, runs the offline self-test, makes the DMG and
+publishes a GitHub release with the DMG and its checksum; a Windows job then
+builds, self-tests and adds the Windows zip and its checksum to the same
+release. Each app's updater offers its own file to everyone. Every push and
+pull request is built and tested on both systems by `.github/workflows/ci.yml`. Adding Developer ID secrets to the
 repository (listed at the top of `release.yml`) turns on signing and
 notarization.
 
@@ -316,13 +340,18 @@ so their text fields are visible to Accessibility.
   field hasn't grown to make room yet, so they can overlap what's below it.
 - Some apps (certain games, remote desktops, custom-drawn editors) don't expose
   their text through Accessibility; OpenTypist stays quiet there.
-- No personalization or learning from your writing yet.
 
 ## Windows
 
-A Windows version is planned. [docs/windows-port.md](docs/windows-port.md) is
-the porting brief: what to build with, every behavior and measured threshold
-to keep, the Windows-specific traps, and how it plugs into CI and releases.
+The Windows version lives in [windows/](windows/): C# on .NET 8 with WPF, UI
+Automation to read the focused field, a low-level keyboard hook, and the same
+llama.cpp (with Vulkan) underneath. It has the Mac app's suggestions,
+mid-word completion, autocorrect, snippets, personalization, screen context,
+memory and battery options, stats and updater, and the same fields left
+alone (with Outlook and Windows Mail in place of Apple Mail). Settings and the
+menu are on the tray icon. [windows/README.md](windows/README.md) covers
+building, testing and what was measured there;
+[docs/windows-port.md](docs/windows-port.md) was the porting brief.
 
 ## License
 

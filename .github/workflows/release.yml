@@ -108,7 +108,7 @@ jobs:
             OPEN_NOTE="Open the DMG and drag OpenTypist into Applications. This build isn't signed with an Apple Developer ID, so the first time you open it macOS will refuse; go to System Settings → Privacy & Security, scroll down and click **Open Anyway** (or run \`xattr -dr com.apple.quarantine /Applications/OpenTypist.app\`). Updates installed from inside the app don't need this."
           fi
           cat > notes.md <<EOF
-          ## Install
+          ## Mac
 
           $OPEN_NOTE
 
