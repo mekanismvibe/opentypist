@@ -151,7 +151,7 @@ public sealed class EngineService : IDisposable
                                          request.Profile, request.Examples);
         int maxWords = request.Length.MaxWords();
         string? lastPartial = null;
-        var output = engine.Complete(prompt.Text, request.Length.MaxTokens(), prompt.HealLastToken, shouldContinue, text =>
+        var output = engine.Complete(prompt.Text, request.Length.MaxTokens(), prompt.WordPrefix, shouldContinue, text =>
         {
             if (onPartial is not null && PromptBuilder.StreamingText(text, prompt, maxWords, request.TextAfter) is string partial
                 && partial != lastPartial)

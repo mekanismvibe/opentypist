@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace OpenTypist;
 
@@ -6,7 +7,10 @@ namespace OpenTypist;
 /// `PromptBuilder` in Sources/OpenTypist/Suggestion.swift.
 public static class PromptBuilder
 {
-    public sealed record Prompt(string Text, bool StrippedTrailingSpace, bool HealLastToken);
+    /// `WordPrefix`: the half-typed word at the caret, with the space before
+    /// it, kept out of `Text`; the model's output must start with it (see
+    /// `LlamaEngine.Complete`). Empty when the caret isn't mid-word.
+    public sealed record Prompt(string Text, bool StrippedTrailingSpace, string WordPrefix);
 
     public const int MaxContextCharacters = 1200;
 
@@ -21,10 +25,38 @@ public static class PromptBuilder
             body = body[..^1];
             stripped = true;
         }
-        bool heal = !stripped && TextUtil.EndsWithLetter(body);
+        var wordPrefix = "";
+        if (!stripped && TextUtil.EndsWithLetter(body))
+        {
+            int start = WordStart(body);
+            wordPrefix = body[start..];
+            body = body[..start];
+            // The space before a word belongs to the word's token.
+            if (body.EndsWith(' '))
+            {
+                body = body[..^1];
+                wordPrefix = " " + wordPrefix;
+            }
+        }
 
         var header = Header(appName, windowTitle, screenText, profile, examples);
-        return new Prompt(header + body, stripped, heal);
+        return new Prompt(header + body, stripped, wordPrefix);
+    }
+
+    private static bool IsApostrophe(char c) => c is '\'' or '’';
+
+    /// Where the word ending `text` starts: letters, with apostrophes between
+    /// letters counting as part of it ("I’m", "don't").
+    private static int WordStart(string text)
+    {
+        int i = text.Length;
+        while (i > 0)
+        {
+            char c = text[i - 1];
+            if (char.IsLetter(c) || (IsApostrophe(c) && i >= 2 && char.IsLetter(text[i - 2]) && i < text.Length && char.IsLetter(text[i]))) i--;
+            else break;
+        }
+        return i;
     }
 
     /// The last `MaxContextCharacters` of the text, not starting mid-word.
@@ -192,6 +224,76 @@ public static class PromptBuilder
         }
         result = result.TrimEnd();
         return TextUtil.ContainsLetterOrNumber(result) ? result : null;
+    }
+
+    /// Whether a suggestion that finishes the half-typed word before the caret
+    /// makes a real word ("tomor" + "row" yes, "tomor" + "ow" no). Suggestions
+    /// that start a new word, short words and capitalized ones (often names
+    /// the dictionary doesn't know) always pass; `isKnown` also covers the
+    /// user's learned words.
+    public static bool MakesRealWord(string textBefore, string suggestion, Func<string, bool> isKnown)
+    {
+        if (!TextUtil.EndsWithLetter(textBefore) || suggestion.Length == 0 || !char.IsLetter(suggestion[0])) return true;
+        int start = textBefore.Length;
+        while (start > 0 && char.IsLetter(textBefore[start - 1])) start--;
+        int end = 0;
+        while (end < suggestion.Length && char.IsLetter(suggestion[end])) end++;
+        var word = textBefore[start..] + suggestion[..end];
+        if (word.Length < 4 || !char.IsLower(word[0])) return true;
+        return isKnown(word);
+    }
+
+    private static readonly Regex ChatTag = new(@"^\[/?[A-Za-z][A-Za-z0-9 _-]{0,24}\]", RegexOptions.Compiled);
+    private static readonly Regex HtmlTag = new(@"</?[A-Za-z][A-Za-z0-9]*(\s[^<>]*)?>", RegexOptions.Compiled);
+    // Whole words, so "has an aim" isn't caught.
+    private static readonly Regex AiTalk = new(@"\bas (an ai|a language model)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// Why a suggestion the model was sure of is still not worth showing
+    /// (phrased to follow "a suggestion that"), or null if it's fine.
+    public static string? JunkReason(string suggestion, string textBefore)
+    {
+        var words = PlainWords(suggestion);
+        // The model stuck in a loop: "Hi S. Hi S. Hi S."
+        for (int period = 1; period <= 3; period++)
+        {
+            if (words.Count < period * 3) continue;
+            int run = 0;
+            for (int i = period; i < words.Count; i++)
+            {
+                run = words[i] == words[i - period] ? run + 1 : 0;
+                if (run >= period * 2) return "repeats itself";
+            }
+        }
+        // Going back over what was just typed instead of continuing it.
+        var recent = PlainWords(TextUtil.Suffix(textBefore, 160));
+        if (recent.Count >= 4 && words.Count >= 4)
+        {
+            var tail = recent.Skip(recent.Count - 4).ToList();
+            for (int s = 0; s + 4 <= words.Count; s++)
+            {
+                if (words.Skip(s).Take(4).SequenceEqual(tail)) return "repeats what was just typed";
+            }
+        }
+        // Leftovers from the chat logs and web pages the model learned from.
+        var trimmed = suggestion.Trim(' ', '\t');
+        if (ChatTag.IsMatch(trimmed)) return "starts with a chat or forum tag";
+        if (!textBefore.Contains('<') && HtmlTag.IsMatch(trimmed)) return "contains HTML";
+        if (AiTalk.IsMatch(trimmed)) return "talks about being an AI";
+        return null;
+    }
+
+    /// Lowercased words without punctuation, for comparing text.
+    private static List<string> PlainWords(string text)
+    {
+        var words = new List<string>();
+        var current = new StringBuilder();
+        foreach (var c in text.ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(c) || IsApostrophe(c)) current.Append(c);
+            else if (current.Length > 0) { words.Add(current.ToString()); current.Clear(); }
+        }
+        if (current.Length > 0) words.Add(current.ToString());
+        return words;
     }
 
     /// Splits into words, each keeping its leading whitespace.

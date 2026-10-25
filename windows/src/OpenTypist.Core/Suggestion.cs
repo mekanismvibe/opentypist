@@ -24,12 +24,20 @@ public sealed class Suggestion
     /// longer matches, e.g. after a typo or a caret move.
     public int? ConsumedCount(string textBefore)
     {
-        for (int k = Text.Length; k >= 0; k--)
+        var text = NormalizingQuotes(Text);
+        var before = NormalizingQuotes(textBefore);
+        var anchor = NormalizingQuotes(AnchorTail);
+        for (int k = text.Length; k >= 0; k--)
         {
-            if (textBefore.EndsWith(AnchorTail + Text[..k], StringComparison.Ordinal)) return k;
+            if (before.EndsWith(anchor + text[..k], StringComparison.Ordinal)) return k;
         }
         return null;
     }
+
+    /// Curly quotes as straight ones: apps with smart quotes (Word, Outlook)
+    /// turn the "I'm" we typed into "I’m". Same length, so positions match.
+    public static string NormalizingQuotes(string text) =>
+        text.Replace('‘', '\'').Replace('’', '\'').Replace('“', '"').Replace('”', '"');
 
     public string? Remaining(string textBefore)
     {

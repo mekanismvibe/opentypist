@@ -159,9 +159,10 @@ public sealed unsafe class LlamaEngine : IDisposable
         var text = string.Concat(Enumerable.Repeat("The quick brown fox jumps over the lazy dog. ", 60));
         foreach (var extra in new[] { "", " It", " It was", " It was a", " It was a sunny day, and", " It was a sunny day, and the children played outside for hours" })
         {
-            Complete(text + extra, 2, false, () => true, _ => false);
+            Complete(text + extra, 2, "", () => true, _ => false);
         }
-        Complete("Hello", 2, true, () => true, _ => false);
+        // Finishing a half-typed word steps through single tokens.
+        Complete(text, 2, " It wa", () => true, _ => false);
         // Autocorrect scores candidates with logits at every position (8 s
         // cold on an RTX 3060).
         Score(text, [" It", " It was", " It was a", " It was a sunny day"]);
@@ -222,36 +223,33 @@ public sealed unsafe class LlamaEngine : IDisposable
 
     /// Continues `prompt` greedily.
     ///
-    /// With `healLastToken`, the last prompt token is removed and the first
-    /// generated token is constrained to start with its bytes. This lets the
-    /// model finish a half-typed word ("I'm runn" -> "ing late") instead of
-    /// being stuck with an unnatural token split.
+    /// `requiredPrefix` is a half-typed word the user is in the middle of
+    /// (with the space before it), left out of `prompt`. The output must start
+    /// with it, so the model spells the whole word with its own tokens
+    /// ("I would really" + " appre" -> " appreciate") instead of continuing
+    /// an unnatural token split, which can misspell it ("appreaciate"). The
+    /// required bytes are not part of the returned text.
     ///
     /// `stop` is called with the text generated so far after every token and
     /// returns true to end generation. Generation also stops at the first
     /// token whose probability is below `minProbability` (or, while still
     /// finishing a half-typed word, below `wordMinProbability`): past that point the
     /// model is guessing. Returns null if cancelled.
-    public Output? Complete(string prompt, int maxTokens, bool healLastToken, Func<bool> shouldContinue, Func<string, bool> stop,
+    public Output? Complete(string prompt, int maxTokens, string requiredPrefix, Func<bool> shouldContinue, Func<string, bool> stop,
                             float minProbability = 0, float? wordMinProbability = null)
     {
         if (ctx == IntPtr.Zero) return null;
 
         var tokens = Tokenize(prompt, addBos: true);
-        byte[] healPrefix = [];
-        if (healLastToken && tokens.Count > 2)
+        var required = Encoding.UTF8.GetBytes(requiredPrefix);
+        if (required.Length > 0 && tokens.Count < 2)
         {
-            int last = tokens[^1];
-            var lastPiece = pieces[last];
-            // Only heal plain word pieces, never control tokens or empty pieces.
-            if (lastPiece.Length > 0 && !isControl[last])
-            {
-                healPrefix = lastPiece;
-                tokens.RemoveAt(tokens.Count - 1);
-            }
+            // Nothing before the word to go on: continue the plain text instead.
+            tokens = Tokenize(prompt + requiredPrefix, addBos: true);
+            required = [];
         }
 
-        int limit = ContextSize - maxTokens - 8;
+        int limit = ContextSize - maxTokens - required.Length - 8;
         if (tokens.Count > limit) tokens = [tokens[0], .. tokens.Skip(tokens.Count - (limit - 1))];
         if (!Evaluate(tokens, shouldContinue)) return null;
 
@@ -260,10 +258,10 @@ public sealed unsafe class LlamaEngine : IDisposable
         bool hitLimit = true;
         var generated = new List<GeneratedToken>();
         bool stoppedForConfidence = false;
-        // Mid-word (token healing), the first pieces finish the typed word.
-        bool finishingWord = healPrefix.Length > 0;
+        // Mid-word, the first pieces finish the typed word.
+        bool finishingWord = required.Length > 0;
 
-        for (int step = 0; step < maxTokens; step++)
+        while (generated.Count < maxTokens)
         {
             if (!shouldContinue()) return null;
             float* logits = Native.llama_get_logits_ith(ctx, -1);
@@ -271,24 +269,34 @@ public sealed unsafe class LlamaEngine : IDisposable
 
             int next;
             float probability;
-            if (step == 0 && healPrefix.Length > 0)
+            byte[] piece;
+            if (required.Length > 0)
             {
-                // Confidence among the tokens that can finish the half-typed word.
-                var healed = BestToken(healPrefix, logits);
-                if (healed is null) { hitLimit = false; break; }
-                next = healed.Value.Token;
-                probability = healed.Value.Probability;
+                var choice = BestToken(required, logits);
+                if (choice is null) { hitLimit = false; break; }
+                next = choice.Value.Token;
+                piece = pieces[next];
+                if (piece.Length < required.Length)
+                {
+                    // Still inside what the user typed: nothing new to show yet.
+                    required = required[piece.Length..];
+                    if (Native.ot_decode(ctx, &next, 1) != 0) { hitLimit = false; break; }
+                    cached.Add(next);
+                    continue;
+                }
+                piece = piece[required.Length..];
+                required = [];
+                probability = choice.Value.Probability;
             }
             else
             {
                 float maxValue = Native.ot_max_index(logits, nVocab, out next);
                 probability = MathF.Exp(maxValue - Native.ot_log_sum_exp(logits, nVocab));
+                piece = pieces[next];
             }
 
             if (Native.llama_vocab_is_eog(vocab, next) || isControl[next]) { hitLimit = false; break; }
 
-            var piece = pieces[next];
-            if (step == 0 && healPrefix.Length > 0) piece = piece[Math.Min(healPrefix.Length, piece.Length)..];
             var token = new GeneratedToken(piece, probability);
             if (finishingWord && token.StartsNewWord) finishingWord = false;
             token.FinishesWord = finishingWord;
@@ -409,31 +417,37 @@ public sealed unsafe class LlamaEngine : IDisposable
         return results;
     }
 
-    /// Most likely token that starts with `prefix`, and its probability among
-    /// all such tokens.
-    private (int Token, float Probability)? BestToken(byte[] prefix, float* logits)
+    /// Most likely token that covers all of `required`, with its probability
+    /// among all covering tokens (how sure the model is about how the word
+    /// goes on). Only when no token covers it, as for a long half-typed word,
+    /// the most likely piece of it (probability 1: it was typed).
+    private (int Token, float Probability)? BestToken(byte[] required, float* logits)
     {
-        int best = -1;
-        float bestValue = float.NegativeInfinity;
-        var candidates = byFirstByte[prefix[0]];
+        int covering = -1, shorter = -1;
+        float coveringValue = float.NegativeInfinity, shorterValue = float.NegativeInfinity;
+        var candidates = byFirstByte[required[0]];
         foreach (int id in candidates)
         {
             var candidate = pieces[id];
-            if (candidate.Length < prefix.Length || !candidate.AsSpan(0, prefix.Length).SequenceEqual(prefix)) continue;
-            if (logits[id] > bestValue)
+            if (candidate.Length >= required.Length)
             {
-                best = id;
-                bestValue = logits[id];
+                if (!candidate.AsSpan(0, required.Length).SequenceEqual(required)) continue;
+                if (logits[id] > coveringValue) { covering = id; coveringValue = logits[id]; }
+            }
+            else if (required.AsSpan(0, candidate.Length).SequenceEqual(candidate) && logits[id] > shorterValue)
+            {
+                shorter = id;
+                shorterValue = logits[id];
             }
         }
-        if (best < 0) return null;
+        if (covering < 0) return shorter < 0 ? null : (shorter, 1f);
         double total = 0;
         foreach (int id in candidates)
         {
             var candidate = pieces[id];
-            if (candidate.Length < prefix.Length || !candidate.AsSpan(0, prefix.Length).SequenceEqual(prefix)) continue;
-            total += Math.Exp(logits[id] - bestValue);
+            if (candidate.Length < required.Length || !candidate.AsSpan(0, required.Length).SequenceEqual(required)) continue;
+            total += Math.Exp(logits[id] - coveringValue);
         }
-        return (best, (float)(1 / total));
+        return (covering, (float)(1 / total));
     }
 }
