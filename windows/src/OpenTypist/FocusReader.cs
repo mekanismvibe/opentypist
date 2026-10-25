@@ -36,7 +36,11 @@ public sealed record FocusContext(
     /// Screen x where lines of text start in this field (for wrapping).
     double? LineStartX = null,
     /// The field's UI Automation element; only for `FocusReader` calls.
-    object? Element = null);
+    object? Element = null,
+    /// Identifies the field while it exists (UI Automation runtime id).
+    string FieldId = "",
+    /// The top-level window, for screen context.
+    IntPtr Window = default);
 
 public sealed record FocusResult(FocusContext? Context, string? Failure);
 
@@ -163,9 +167,25 @@ public sealed class FocusReader : IDisposable
 
         var beforeRange = caret.Clone();
         beforeRange.MoveEndpointByUnit(TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start, TextUnit.TextUnit_Character, -MaxCharacters);
-        var before = beforeRange.GetText(-1) ?? "";
         var afterRange = caret.Clone();
         afterRange.MoveEndpointByUnit(TextPatternRangeEndpoint.TextPatternRangeEndpoint_End, TextUnit.TextUnit_Character, 200);
+        // Chromium lets these run past a text area into the rest of the page
+        // (headings, a message above it, a button label after it): keep
+        // them inside the field.
+        try
+        {
+            var document = pattern.DocumentRange;
+            if (beforeRange.CompareEndpoints(TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start, document, TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start) < 0)
+            {
+                beforeRange.MoveEndpointByRange(TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start, document, TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start);
+            }
+            if (afterRange.CompareEndpoints(TextPatternRangeEndpoint.TextPatternRangeEndpoint_End, document, TextPatternRangeEndpoint.TextPatternRangeEndpoint_End) > 0)
+            {
+                afterRange.MoveEndpointByRange(TextPatternRangeEndpoint.TextPatternRangeEndpoint_End, document, TextPatternRangeEndpoint.TextPatternRangeEndpoint_End);
+            }
+        }
+        catch (COMException) { }
+        var before = beforeRange.GetText(-1) ?? "";
         var after = afterRange.GetText(-1) ?? "";
 
         before = TextUtil.NormalizeNewlines(before);
@@ -190,8 +210,12 @@ public sealed class FocusReader : IDisposable
         bool singleLine = controlType is UIA_EditControlTypeId or UIA_ComboBoxControlTypeId && !IsMultiLine(element);
         double? lineStart = singleLine || caretRect is not Rect c ? null : LineStartX(caret, c, before);
 
+        string fieldId;
+        try { fieldId = element.GetRuntimeId() is int[] runtimeId ? string.Join(".", runtimeId) : ""; }
+        catch (COMException) { fieldId = ""; }
+
         return new FocusResult(new FocusContext(pid, app.Id, app.Name, windowTitle, role, before, after, caretRect, style, frame,
-                                                singleLine, lineStart, element), null);
+                                                singleLine, lineStart, element, fieldId, hwnd), null);
     }
 
     /// Left edge of the caret's visual line: its first character, so wrapped
