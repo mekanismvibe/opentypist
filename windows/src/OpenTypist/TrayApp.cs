@@ -129,7 +129,7 @@ public sealed class TrayApp : IDisposable
         {
             if (loadedModelPath is null) return "model";
             var file = Path.GetFileName(loadedModelPath);
-            return ModelCatalog.All.FirstOrDefault(m => m.FileName == file)?.Name ?? Path.GetFileNameWithoutExtension(file);
+            return ModelCatalog.All.FirstOrDefault(m => m.FileNames.Contains(file))?.Name ?? Path.GetFileNameWithoutExtension(file);
         }
     }
 

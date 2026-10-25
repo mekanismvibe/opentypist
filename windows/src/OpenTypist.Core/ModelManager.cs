@@ -34,7 +34,13 @@ public sealed class ModelManager
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenTypist", "Models");
     }
 
-    public string FileFor(ModelInfo model) => Path.Combine(ModelsDirectory, model.FileName);
+    /// Where a new download of `model` goes.
+    public string DownloadPathFor(ModelInfo model) => Path.Combine(ModelsDirectory, model.FileName);
+
+    /// The file to load: the current one, or an earlier file of the same
+    /// model that is already on disk (Gemma 4 E2B's former Q4_K_M).
+    public string FileFor(ModelInfo model) =>
+        model.FileNames.Select(name => Path.Combine(ModelsDirectory, name)).FirstOrDefault(File.Exists) ?? DownloadPathFor(model);
 
     public bool IsDownloaded(ModelInfo model) => File.Exists(FileFor(model));
 
@@ -54,8 +60,12 @@ public sealed class ModelManager
 
     public void Delete(ModelInfo model)
     {
-        try { File.Delete(FileFor(model)); } catch (IOException) { }
-        try { File.Delete(FileFor(model) + ".partial"); } catch (IOException) { }
+        foreach (var name in model.FileNames)
+        {
+            var path = Path.Combine(ModelsDirectory, name);
+            try { File.Delete(path); } catch (IOException) { }
+            try { File.Delete(path + ".partial"); } catch (IOException) { }
+        }
     }
 
     public void CancelDownload()
@@ -76,7 +86,7 @@ public sealed class ModelManager
 
     private async Task DownloadAsync(ModelInfo model, CancellationToken token)
     {
-        var partial = FileFor(model) + ".partial";
+        var partial = DownloadPathFor(model) + ".partial";
         try
         {
             Directory.CreateDirectory(ModelsDirectory);
@@ -118,7 +128,7 @@ public sealed class ModelManager
 
             SetState(new DownloadState(Phase.Verifying, model.Id, model.Size, model.Size));
             Verify(partial, model);
-            File.Move(partial, FileFor(model), overwrite: true);
+            File.Move(partial, DownloadPathFor(model), overwrite: true);
             SetState(DownloadState.None);
             Post(() => Installed?.Invoke(model));
         }

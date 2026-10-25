@@ -8,9 +8,14 @@ public sealed record ModelInfo(
     string Id, string Name, string Family, string Summary, string Repo, string Revision, string FileName,
     long Size, string Sha256,
     /// Memory needed to run it comfortably next to other apps.
-    int MinMemoryGB, string Speed, string Quality)
+    int MinMemoryGB, string Speed, string Quality,
+    /// Earlier files of the same model that still count as downloaded.
+    string[]? LegacyFileNames = null)
 {
     public Uri Url => new($"https://huggingface.co/{Repo}/resolve/{Revision}/{FileName}");
+
+    /// The current file name first, then earlier ones.
+    public IEnumerable<string> FileNames => LegacyFileNames is null ? [FileName] : [FileName, .. LegacyFileNames];
 
     public string SizeText => Size >= 1_000_000_000 ? $"{Size / 1e9:0.0} GB" : $"{Size / 1e6:0} MB";
 }
@@ -22,17 +27,21 @@ public static class ModelCatalog
     public static readonly IReadOnlyList<ModelInfo> All =
     [
         new("qwen3-1.7b", "Qwen 3 1.7B", "Alibaba Qwen 3",
-            "Smallest and fastest. Good for 8 GB PCs, PCs without a graphics card, or when battery life matters most.",
+            "Smallest and fastest, slightly less accurate than Gemma 4 E2B. Good for 8 GB PCs, PCs without a graphics card, or to save battery.",
             "mradermacher/Qwen3-1.7B-Base-i1-GGUF", "c11e7b148b8e7ee59a63cc8faa90b842e25e8942",
             "Qwen3-1.7B-Base.i1-Q4_K_M.gguf", 1_107_409_248,
             "b3aac3227132b11e0ea8c818569f27c053ebde24d0b8530f3bd476e7ff33ee20",
             8, "Fastest", "Good"),
         new("gemma-4-e2b", "Gemma 4 E2B", "Google Gemma 4",
             "The default. Fast, natural suggestions on most PCs.",
+            // Q4_0 rather than Q4_K_M, like the Mac app: same measured
+            // suggestion quality (`--calibrate`), as fast or slightly faster
+            // on Vulkan and faster on the CPU, slightly smaller (windows/README.md).
             "mradermacher/gemma-4-E2B-i1-GGUF", "a9bf638e53783fc93778f357cc5c672eab5393b1",
-            "gemma-4-E2B.i1-Q4_K_M.gguf", 3_427_862_240,
-            "3cc0e9c2b4bbffea7f3f6cfe1ffd1591f4dafe02c43f78952f1142a24172df65",
-            8, "Fast", "Better"),
+            "gemma-4-E2B.i1-Q4_0.gguf", 3_362_502_368,
+            "50dffdea1974b389a70909510c27634030c420a5a32a5a7ee620ff11aa4fd43d",
+            8, "Fast", "Better",
+            LegacyFileNames: ["gemma-4-E2B.i1-Q4_K_M.gguf"]),
         new("gemma-4-e4b", "Gemma 4 E4B", "Google Gemma 4",
             "Noticeably smarter than E2B, a little slower. Great with 24 GB or more, or a graphics card with 8 GB.",
             "mradermacher/gemma-4-E4B-GGUF", "712b177e561b537a217d1f73799a15e7bb99eb66",
