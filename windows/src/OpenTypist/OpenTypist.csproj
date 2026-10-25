@@ -2,7 +2,9 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- Windows 10 1809+; the SDK projection is for Windows.Media.Ocr (screen context). -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
     <RootNamespace>OpenTypist</RootNamespace>
     <AssemblyName>OpenTypist</AssemblyName>
     <Nullable>enable</Nullable>
@@ -15,7 +17,11 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <StartupObject>OpenTypist.Program</StartupObject>
-    <Version>0.3.0</Version>
+    <!-- Same version as the Mac app (Resources/Info.plist), unless
+         build.ps1 -Version (a release tag) says otherwise. -->
+    <InfoPlist>$(MSBuildThisFileDirectory)..\..\..\Resources\Info.plist</InfoPlist>
+    <Version Condition="'$(Version)' == '' or '$(Version)' == '1.0.0'">$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText($(InfoPlist))), 'CFBundleShortVersionString&lt;/key&gt;\s*&lt;string&gt;([^&lt;]+)').Groups[1].Value)</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>OpenTypist</Product>
     <Description>OpenTypist</Description>
     <Copyright>MIT License</Copyright>

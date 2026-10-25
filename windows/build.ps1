@@ -22,13 +22,23 @@ Reuse the native DLLs from the last build.
 
 .PARAMETER Out
 Where the app goes (default build\windows\OpenTypist).
+
+.PARAMETER Version
+The app's version (default: CFBundleShortVersionString in
+Resources/Info.plist, the same as the Mac app).
+
+.PARAMETER Package
+Also zip the app as build\windows\OpenTypist-<version>-win-x64.zip with a
+.zip.sha256 beside it: the release assets the updater looks for.
 #>
 param(
     [switch]$NoVulkan,
     [switch]$Cuda,
     [switch]$SkipNative,
     [switch]$SkipApp,
-    [string]$Out
+    [string]$Out,
+    [string]$Version,
+    [switch]$Package
 )
 $ErrorActionPreference = 'Stop'
 
@@ -39,6 +49,13 @@ $nativeBuild = Join-Path $root 'build\wn'
 $runtime = Join-Path $root 'build\wn\runtime'
 $out = if ($Out) { [IO.Path]::GetFullPath($Out) } else { Join-Path $root 'build\windows\OpenTypist' }
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (-not $Version) {
+    $plist = Get-Content -Raw (Join-Path $root 'Resources\Info.plist')
+    if ($plist -notmatch 'CFBundleShortVersionString</key>\s*<string>([^<]+)</string>') { throw 'No version in Resources/Info.plist' }
+    $Version = $Matches[1]
+}
+$Version = $Version.TrimStart('v')
+if ($Version -notmatch '^\d+(\.\d+){0,3}$') { throw "Version must look like 1.2.3, not $Version" }
 
 function Find-Tool($name, [scriptblock]$fallback) {
     $cmd = Get-Command $name -ErrorAction SilentlyContinue
@@ -110,11 +127,31 @@ if (-not $SkipApp) {
     & (Join-Path $PSScriptRoot 'tools\icns-to-ico.ps1') -Icns (Join-Path $root 'Resources\AppIcon.icns') -Ico $icon
 
     $dotnet = Find-Tool 'dotnet' { Join-Path $env:ProgramFiles 'dotnet\dotnet.exe' }
-    Write-Host '== OpenTypist app'
+    Write-Host "== OpenTypist $Version"
     $running = Get-Process OpenTypist -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($out, [StringComparison]::OrdinalIgnoreCase) }
     if ($running) { throw "OpenTypist is running from $out. Quit it from its tray icon first, or build somewhere else with -Out." }
     if (Test-Path $out) { Remove-Item -Recurse -Force $out }
     Invoke-Checked $dotnet publish (Join-Path $PSScriptRoot 'src\OpenTypist\OpenTypist.csproj') -c Release -r win-x64 --self-contained true `
-        -o $out "-p:NativeDir=$runtime\" "-p:AppIconPath=$icon" -nologo
+        -o $out "-p:NativeDir=$runtime\" "-p:AppIconPath=$icon" "-p:Version=$Version" -nologo
     Write-Host "Built $out\OpenTypist.exe"
+}
+
+if ($Package) {
+    if (-not (Test-Path (Join-Path $out 'OpenTypist.exe'))) { throw "Nothing to package in $out" }
+    # The updater and release.yml share these names (Versions.WindowsZip).
+    $name = "OpenTypist-$Version-win-x64.zip"
+    $zip = Join-Path $root "build\windows\$name"
+    if (Test-Path $zip) { Remove-Item -Force $zip }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    # One OpenTypist folder inside, so unzipping gives a folder to keep.
+    $staging = Join-Path $root 'build\windows\package'
+    if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
+    New-Item -ItemType Directory -Force $staging | Out-Null
+    Copy-Item -Recurse $out (Join-Path $staging 'OpenTypist')
+    [IO.Compression.ZipFile]::CreateFromDirectory($staging, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
+    Remove-Item -Recurse -Force $staging
+    # sha256sum format, like the Mac .dmg.sha256.
+    $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText("$zip.sha256", "$hash  $name`n", (New-Object Text.UTF8Encoding $false))
+    Write-Host "Packaged $zip ($([math]::Round((Get-Item $zip).Length / 1MB)) MB, SHA-256 $hash)"
 }
