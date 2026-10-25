@@ -20,6 +20,9 @@ final class Autocorrector {
 
     /// Tells the completion controller that we changed the text.
     var onTextChanged: (() -> Void)?
+    /// The focused field asks for an email, username or code (see
+    /// `FieldPolicy`): nothing gets corrected there or learned from it.
+    var inSignInField = false
 
     /// Text typed since the caret last jumped (click, arrows, shortcut).
     private var typed = ""
@@ -120,7 +123,7 @@ final class Autocorrector {
     /// Runs even with autocorrect off, so typing habits are still learned.
     func handleKeyDown(_ event: CGEvent, app: NSRunningApplication?) -> Bool {
         let bundleID = app?.bundleIdentifier
-        guard settings.enabled, !settings.isDisabled(bundleID: bundleID) else {
+        guard settings.enabled, !settings.isDisabled(bundleID: bundleID), !inSignInField else {
             reset()
             return false
         }

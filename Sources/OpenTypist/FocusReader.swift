@@ -42,6 +42,8 @@ enum FocusFailure: Error, CustomStringConvertible {
     case textSelected(app: String)
     case unreadableText(app: String, role: String)
     case composing(app: String)
+    case signInField(app: String)
+    case mailHeader(app: String)
 
     var description: String {
         switch self {
@@ -52,6 +54,8 @@ enum FocusFailure: Error, CustomStringConvertible {
         case .textSelected(let app): return "\(app): text is selected"
         case .unreadableText(let app, let role): return "\(app): couldn't read the text of \(role)"
         case .composing(let app): return "\(app): waiting for the input method to finish"
+        case .signInField(let app): return "\(app): sign-in or verification field, skipped"
+        case .mailHeader(let app): return "\(app): address and subject fields are left to Mail"
         }
     }
 }
@@ -94,6 +98,12 @@ enum FocusReader {
         let subrole: String? = attribute(element, kAXSubroleAttribute)
         if subrole == (kAXSecureTextFieldSubrole as String) || role == "AXSecureTextField" {
             return .failure(.secureField(app: appName))
+        }
+        if FieldPolicy.isMailHeaderField(bundleID: app.bundleIdentifier, role: role) {
+            return .failure(.mailHeader(app: appName))
+        }
+        if FieldPolicy.singleLineRoles.contains(role), isSignInField(element, role: role) {
+            return .failure(.signInField(app: appName))
         }
 
         guard let rangeValue: AXValue = attribute(element, kAXSelectedTextRangeAttribute) else {
@@ -260,6 +270,20 @@ enum FocusReader {
     }
 
     // MARK: - Helpers
+
+    /// What the field says about itself (label, placeholder, id) and its
+    /// text, checked against `FieldPolicy.isSignInField`.
+    private static func isSignInField(_ element: AXUIElement, role: String) -> Bool {
+        var labels: [String?] = [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXHelpAttribute]
+            .map { attribute(element, $0) }
+        if let label: AXUIElement = attribute(element, kAXTitleUIElementAttribute) {
+            labels += [attribute(label, kAXValueAttribute), attribute(label, kAXTitleAttribute)]
+        }
+        let identifiers: [String?] = [attribute(element, "AXDOMIdentifier"), attribute(element, kAXIdentifierAttribute)]
+        let value: String = attribute(element, kAXValueAttribute) ?? ""
+        return FieldPolicy.isSignInField(role: role, labels: labels.compactMap { $0 },
+                                         identifiers: identifiers.compactMap { $0 }, value: String(value.prefix(200)))
+    }
 
     /// Whether the keyboard input is an input method (Japanese, Chinese,
     /// Korean…) rather than a plain layout; only then is marked text a

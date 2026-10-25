@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.autocorrector.reset()
         }
         controller.onAccept = { [weak self] text in self?.autocorrector.noteInserted(text) }
+        controller.onSignInField = { [weak self] signIn in self?.autocorrector.inSignInField = signIn }
         autocorrector.onTextChanged = { [weak self] in self?.controller.textChangedExternally() }
         AppStatus.shared.autocorrector = autocorrector
 

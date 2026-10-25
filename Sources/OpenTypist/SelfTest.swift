@@ -151,6 +151,11 @@ enum SelfTest {
         let lineStart = PromptBuilder.build(textBefore: "Hi,\nTha", appName: nil, windowTitle: nil)
         precondition(lineStart.text == "Hi,\n" && lineStart.wordPrefix == "Tha")
         precondition(PromptBuilder.build(textBefore: "see you ", appName: nil, windowTitle: nil).wordPrefix.isEmpty)
+        precondition(PromptBuilder.build(textBefore: "so quickly. I\u{2019}m", appName: nil, windowTitle: nil).wordPrefix == " I\u{2019}m")
+
+        // Smart quotes don't break following a suggestion as it's typed.
+        let curly = Suggestion(textBefore: "Thanks so", text: " much. I'm free", pid: 1)
+        precondition(curly.remaining(textBefore: "Thanks so much. I\u{2019}m") == " free")
 
         // Finishing a half-typed word has to make a real word.
         let known: (String) -> Bool = { ["tomorrow", "appreciate"].contains($0) }
@@ -158,6 +163,29 @@ enum SelfTest {
         precondition(!PromptBuilder.makesRealWord(textBefore: "see you tomor", suggestion: "ow at", isKnown: known))
         precondition(PromptBuilder.makesRealWord(textBefore: "see you ", suggestion: "tomorow", isKnown: known))
         precondition(PromptBuilder.makesRealWord(textBefore: "ask Prox", suggestion: "mox", isKnown: known))
+
+        // Junk the model can be sure of.
+        precondition(PromptBuilder.junkReason(" Hi S. Hi S. Hi S.", textBefore: "Hello") == "repeats itself")
+        precondition(PromptBuilder.junkReason("o much. Hi Sarah, thanks for s", textBefore: "Hi Sarah, thanks for s") == "repeats what was just typed")
+        precondition(PromptBuilder.junkReason(" [User 0001] hello", textBefore: "ok") != nil)
+        precondition(PromptBuilder.junkReason(" <br> see you", textBefore: "ok") == "contains HTML")
+        precondition(PromptBuilder.junkReason(" for the <b> tag", textBefore: "use <b>") == nil)
+        precondition(PromptBuilder.junkReason(" so much for helping me move", textBefore: "thanks") == nil)
+        precondition(PromptBuilder.junkReason(" had had enough", textBefore: "she") == nil)
+
+        // Sign-in fields and Mail's address fields are left alone.
+        func signIn(_ labels: [String], _ identifiers: [String] = [], value: String = "", role: String = "AXTextField") -> Bool {
+            FieldPolicy.isSignInField(role: role, labels: labels, identifiers: identifiers, value: value)
+        }
+        precondition(signIn(["Email or phone"]) && signIn(["Enter PIN"]) && signIn(["Your e-mail"]) && signIn(["Verification code"]))
+        precondition(signIn([], ["identifierId"]) && signIn([], ["otp-input"]) && signIn([], ["user_email"]) && signIn([], ["txtPassword"]))
+        precondition(signIn([], value: "alice@exa") && signIn([], value: "alice@example.com"))
+        precondition(!signIn(["Email subject"]) && !signIn(["Search mail"], ["emailSearch"]) && !signIn(["Promo code"]))
+        precondition(!signIn(["Shipping address"], ["spinner-box"], value: "medium.com/@alice"))
+        precondition(!signIn(["Email"], role: "AXTextArea"))
+        precondition(FieldPolicy.isMailHeaderField(bundleID: "com.apple.mail", role: "AXTextField"))
+        precondition(!FieldPolicy.isMailHeaderField(bundleID: "com.apple.mail", role: "AXTextArea"))
+        precondition(!FieldPolicy.isMailHeaderField(bundleID: "com.apple.TextEdit", role: "AXTextField"))
 
         // Gemma 4 E2B moved to Q4_0; the earlier Q4_K_M file still counts.
         let gemma = ModelCatalog.model(id: "gemma-4-e2b")!

@@ -19,11 +19,25 @@ struct Suggestion {
     /// accepted), given the new text before the caret. nil when the text no
     /// longer matches, e.g. after a typo or a caret move.
     func consumedCount(textBefore: String) -> Int? {
-        let chars = Array(text)
+        let chars = Array(Self.normalizingQuotes(text))
+        let before = Self.normalizingQuotes(textBefore)
+        let anchor = Self.normalizingQuotes(anchorTail)
         for k in stride(from: chars.count, through: 0, by: -1) {
-            if textBefore.hasSuffix(anchorTail + String(chars[0..<k])) { return k }
+            if before.hasSuffix(anchor + String(chars[0..<k])) { return k }
         }
         return nil
+    }
+
+    /// Curly quotes as straight ones: apps with smart quotes turn the
+    /// "I'm" we typed into "I’m".
+    static func normalizingQuotes(_ text: String) -> String {
+        String(text.map { c -> Character in
+            switch c {
+            case "\u{2018}", "\u{2019}": return "'"
+            case "\u{201C}", "\u{201D}": return "\""
+            default: return c
+            }
+        })
     }
 
     func remaining(textBefore: String) -> String? {
@@ -84,7 +98,9 @@ enum PromptBuilder {
         }
         var wordPrefix = ""
         if !stripped, body.last?.isLetter == true {
-            let wordStart = body.lastIndex(where: { !$0.isLetter }).map { body.index(after: $0) } ?? body.startIndex
+            // An apostrophe is inside a word: "I’m" is whole, not "I’" + "m".
+            let wordStart = body.lastIndex(where: { !$0.isLetter && $0 != "'" && $0 != "\u{2019}" })
+                .map { body.index(after: $0) } ?? body.startIndex
             wordPrefix = String(body[wordStart...])
             body = String(body[..<wordStart])
             // The space before a word belongs to the word's token.
@@ -233,6 +249,46 @@ enum PromptBuilder {
         let word = typed + String(suggestion.prefix(while: \.isLetter))
         guard word.count >= 4, word.first?.isLowercase == true else { return true }
         return isKnown(word)
+    }
+
+    /// Why a suggestion the model was sure of is still not worth showing
+    /// (phrased to follow "a suggestion that"), or nil if it's fine.
+    static func junkReason(_ suggestion: String, textBefore: String) -> String? {
+        let words = plainWords(suggestion)
+        // The model stuck in a loop: "Hi S. Hi S. Hi S."
+        for period in 1...3 where words.count >= period * 3 {
+            var run = 0
+            for i in period..<words.count {
+                run = words[i] == words[i - period] ? run + 1 : 0
+                if run >= period * 2 { return "repeats itself" }
+            }
+        }
+        // Going back over what was just typed instead of continuing it.
+        let recent = plainWords(String(textBefore.suffix(160)))
+        if recent.count >= 4, words.count >= 4 {
+            let tail = Array(recent.suffix(4))
+            if (0...(words.count - 4)).contains(where: { Array(words[$0..<($0 + 4)]) == tail }) {
+                return "repeats what was just typed"
+            }
+        }
+        // Leftovers from the chat logs and web pages the model learned from.
+        let trimmed = suggestion.trimmingCharacters(in: .whitespaces)
+        if trimmed.range(of: #"^\[/?[A-Za-z][A-Za-z0-9 _-]{0,24}\]"#, options: .regularExpression) != nil {
+            return "starts with a chat or forum tag"
+        }
+        if !textBefore.contains("<"), trimmed.range(of: #"</?[A-Za-z][A-Za-z0-9]*(\s[^<>]*)?>"#, options: .regularExpression) != nil {
+            return "contains HTML"
+        }
+        let lower = trimmed.lowercased()
+        if ["as an ai", "as a language model"].contains(where: lower.contains) {
+            return "talks about being an AI"
+        }
+        return nil
+    }
+
+    /// Lowercased words without punctuation, for comparing text.
+    private static func plainWords(_ text: String) -> [String] {
+        text.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "'" }.map(String.init)
     }
 
     /// Splits into words, each keeping its leading whitespace.

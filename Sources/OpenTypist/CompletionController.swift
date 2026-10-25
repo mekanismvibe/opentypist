@@ -21,9 +21,18 @@ final class CompletionController {
     private var obstacleCache: (key: String, x: CGFloat?, checkedTo: CGFloat)?
     /// Set by Escape; cleared by the next typing key.
     private var suppressed = false
+    /// After accepting, the overlay is down until the rest of the suggestion
+    /// (or the next one) is up again. An accept key pressed in that gap would
+    /// reach the app (a tab, or focus moving on), so it is swallowed; it
+    /// carries on accepting if the rest of the same suggestion comes back.
+    private var acceptGap: (until: Date, held: AcceptKind?)?
+    private enum AcceptKind { case word, all }
 
     /// Called with text inserted by accepting a suggestion.
     var onAccept: ((String) -> Void)?
+    /// Called with whether the focused field is a sign-in field, each time
+    /// a field is read.
+    var onSignInField: ((Bool) -> Void)?
 
     init(engine: EngineService) {
         self.engine = engine
@@ -34,8 +43,22 @@ final class CompletionController {
     /// Tab, Shift-Tab and Esc while a suggestion is showing. Returns true if
     /// the key was used (and must be swallowed).
     func handleSuggestionKey(_ event: CGEvent) -> Bool {
-        guard overlay.isVisible, let visible = visibleText else { return false }
         let keys = settings.acceptKeys(for: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        guard overlay.isVisible, let visible = visibleText else {
+            guard let gap = acceptGap, gap.until > Date() else {
+                acceptGap = nil
+                return false
+            }
+            if keys.all.matches(event) {
+                acceptGap?.held = .all
+                return true
+            }
+            if keys.word.matches(event) {
+                acceptGap?.held = .word
+                return true
+            }
+            return false
+        }
         if keys.all.matches(event) {
             accept(visible)
             return true
@@ -67,6 +90,7 @@ final class CompletionController {
             return dismiss()
         }
         suppressed = false
+        acceptGap = nil
         engine.cancelAll()
 
         // Keep the ghost text while the user types exactly what it suggests:
@@ -103,6 +127,7 @@ final class CompletionController {
         engine.cancelAll()
         suggestion = nil
         pendingAccept = nil
+        acceptGap = nil
         hideOverlay()
     }
 
@@ -124,6 +149,7 @@ final class CompletionController {
         stats.recordAccepted(inserted)
         let tail = suggestion.anchorTail + String(suggestion.text.prefix(consumedBefore)) + inserted
         pendingAccept = (String(tail.suffix(40)), 8)
+        acceptGap = (Date().addingTimeInterval(1.2), nil)
         scheduleRefresh(after: 0.04)
     }
 
@@ -146,8 +172,12 @@ final class CompletionController {
 
         let ctx: FocusContext
         switch FocusReader.read() {
-        case .success(let value): ctx = value
-        case .failure(let failure): return skip(failure.description)
+        case .success(let value):
+            ctx = value
+            onSignInField?(false)
+        case .failure(let failure):
+            if case .signInField = failure { onSignInField?(true) }
+            return skip(failure.description)
         }
         if settings.isDisabled(bundleID: ctx.bundleID) { return skip("\(ctx.appName): turned off for this app") }
         WritingSamples.shared.observe(ctx)
@@ -170,7 +200,7 @@ final class CompletionController {
         }
 
         if let pending = pendingAccept {
-            if !before.hasSuffix(pending.expectedTail), pending.retries > 0 {
+            if !Suggestion.normalizingQuotes(before).hasSuffix(Suggestion.normalizingQuotes(pending.expectedTail)), pending.retries > 0 {
                 pendingAccept = (pending.expectedTail, pending.retries - 1)
                 scheduleRefresh(after: 0.04)
                 return
@@ -178,7 +208,7 @@ final class CompletionController {
             pendingAccept = nil
         }
         if let current = suggestion, current.pid == ctx.pid, let rest = current.remaining(textBefore: before) {
-            show(rest, context: ctx, caret: caret)
+            show(rest, context: ctx, caret: caret, continuing: true)
             return
         }
 
@@ -204,12 +234,10 @@ final class CompletionController {
         // Returns whether it was shown.
         let present: (String) -> Bool = { [weak self] text in
             guard let self, self.settings.enabled else { return false }
-            guard PromptBuilder.makesRealWord(textBefore: before, suggestion: text, isKnown: {
-                SpellCheck.isValidWord($0) || Personalization.shared.isNeverCorrect($0)
-            }) else {
+            if let reason = Self.rejection(of: text, before: before) {
                 self.suggestion = nil
                 self.hideOverlay()
-                self.status.note("\(ctx.appName): dropped a suggestion that misspells the word being typed")
+                self.status.note("\(ctx.appName): dropped a suggestion that \(reason)")
                 return false
             }
             self.suggestion = Suggestion(textBefore: before, text: text, pid: ctx.pid)
@@ -223,19 +251,33 @@ final class CompletionController {
         engine.complete(request, onPartial: { _ = present($0) }) { [weak self] text in
             guard let self else { return }
             let ms = Int(Date().timeIntervalSince(started) * 1000)
-            if let text {
-                if present(text) {
-                    self.status.note("\(ctx.appName): suggestion shown after \(firstShownMs ?? ms) ms, complete after \(ms) ms")
-                }
-            } else if firstShownMs == nil {
+            if let text, present(text) {
+                self.status.note("\(ctx.appName): suggestion shown after \(firstShownMs ?? ms) ms, complete after \(ms) ms")
+                return
+            }
+            // Nothing is coming: an accept key no longer needs holding.
+            self.acceptGap = nil
+            if text == nil, firstShownMs == nil {
                 self.status.note("\(ctx.appName): the model had no good suggestion (\(ms) ms)")
             }
         }
     }
 
+    /// Why a suggestion isn't worth showing, or nil.
+    private static func rejection(of text: String, before: String) -> String? {
+        if !PromptBuilder.makesRealWord(textBefore: before, suggestion: text, isKnown: {
+            SpellCheck.isValidWord($0) || Personalization.shared.isNeverCorrect($0)
+        }) {
+            return "misspells the word being typed"
+        }
+        return PromptBuilder.junkReason(text, textBefore: before)
+    }
+
     // MARK: - Overlay
 
-    private func show(_ text: String, context: FocusContext, caret: CGRect) {
+    /// `continuing`: `text` is the rest of a suggestion the user has already
+    /// seen and started accepting.
+    private func show(_ text: String, context: FocusContext, caret: CGRect, continuing: Bool = false) {
         visibleText = text
         let keys = settings.acceptKeys(for: context.bundleID)
         var shown = text
@@ -264,6 +306,16 @@ final class CompletionController {
         } else {
             overlay.show(shown, at: anchor, style: context.style, wrap: wrapGuide(for: shown, context: context, caret: anchor),
                          hint: keys.word.hintLabel)
+        }
+        // The gap after accepting is over. An accept key held in it carries on
+        // with the suggestion being accepted; a new one has to be seen first.
+        if let gap = acceptGap {
+            acceptGap = nil
+            switch continuing ? gap.held : nil {
+            case .all: accept(text)
+            case .word: accept(Suggestion.nextWord(of: text, includeTrailingSpace: settings.acceptTrailingSpace))
+            case nil: break
+            }
         }
     }
 
