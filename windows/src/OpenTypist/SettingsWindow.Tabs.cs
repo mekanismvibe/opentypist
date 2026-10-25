@@ -114,7 +114,6 @@ public partial class SettingsWindow
             ? $"Spell checking in {string.Join(", ", SpellCheck.Languages)}, your Windows languages (Settings > Time & language > Language & region)."
             : "Windows has no spell checker for your languages, so only the lists are used.";
         RefreshLists();
-        RefreshNeverCorrect();
 
         ImportListButton.Click += (_, _) =>
         {
@@ -139,11 +138,7 @@ public partial class SettingsWindow
             Directory.CreateDirectory(Autocorrector.UserListsDirectory);
             Process.Start(new ProcessStartInfo("explorer.exe", $"\"{Autocorrector.UserListsDirectory}\"") { UseShellExecute = true });
         };
-        RemoveNeverCorrectButton.Click += (_, _) =>
-        {
-            foreach (var word in NeverCorrectList.SelectedItems.Cast<string>().ToList()) app.NeverCorrect.Remove(word);
-            RefreshNeverCorrect();
-        };
+
     }
 
     private void RefreshLists()
@@ -154,11 +149,6 @@ public partial class SettingsWindow
         ListsText.Text = string.Join("\n", lines);
     }
 
-    private void RefreshNeverCorrect()
-    {
-        NeverCorrectList.ItemsSource = app.NeverCorrect.All;
-        RemoveNeverCorrectButton.IsEnabled = app.NeverCorrect.All.Count > 0;
-    }
 
     // Snippets
 

@@ -6,9 +6,11 @@ using System.Windows.Media;
 
 namespace OpenTypist;
 
-/// Settings: general options and accept keys, autocorrect, snippets, apps
-/// (disabled list and per-app keys) and the model picker. The tabs other
-/// than General and Model are in SettingsWindow.Tabs.cs.
+/// Settings: general options and accept keys, personal data, autocorrect,
+/// snippets, apps (disabled list and per-app keys), the model picker and
+/// stats. Autocorrect, Snippets and Apps are in SettingsWindow.Tabs.cs;
+/// Personal, Stats and General's power and update sections in
+/// SettingsWindow.Personal.cs.
 public partial class SettingsWindow : Window
 {
     private readonly TrayApp app;
@@ -61,13 +63,26 @@ public partial class SettingsWindow : Window
         SetUpAutocorrect();
         SetUpSnippets();
         SetUpApps();
+        SetUpPowerAndUpdates();
+        SetUpPersonal();
+        SetUpStats();
     }
 
-    public void SelectModelTab() => Tabs.SelectedItem = ModelTab;
+    public void SelectTab(string header) => Tabs.SelectedItem = Tabs.Items.OfType<TabItem>().FirstOrDefault(t => (string)t.Header == header) ?? Tabs.SelectedItem;
 
-    private void OnDownloadChanged() { BuildModelList(); RefreshStatus(); }
+    private void OnDownloadChanged()
+    {
+        BuildModelList();
+        BuildSmallerModelBox();
+        RefreshStatus();
+    }
 
-    private void OnEngineChanged(EngineService.State state) { BuildModelList(); RefreshStatus(); }
+    private void OnEngineChanged(EngineService.State state)
+    {
+        BuildModelList();
+        RefreshStatus();
+        RefreshPower();
+    }
 
     private void LoadValues()
     {

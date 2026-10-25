@@ -1,6 +1,7 @@
 <Window x:Class="OpenTypist.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:OpenTypist"
         Title="OpenTypist Settings" Width="700" Height="700" MinWidth="560" MinHeight="480"
         WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13">
     <Window.Resources>
@@ -71,12 +72,136 @@
 
                     <TextBlock Text="Context" Style="{StaticResource Heading}" />
                     <CheckBox x:Name="AppContextBox" Content="Tell the model which app and window you're typing in" Margin="0,0,0,0" />
-                    <TextBlock Style="{StaticResource Help}" Text="Everything stays on this PC: the model runs locally and nothing you type is sent anywhere." />
+                    <CheckBox x:Name="ScreenContextBox" Content="Use text visible on screen as context" />
+                    <TextBlock x:Name="ScreenContextHelp" Style="{StaticResource Help}"
+                               Text="Reads the window you're typing in with Windows' own text recognition, so suggestions fit the email or chat around them. The picture and the text stay in memory and are never saved." />
+                    <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0" Text="Everything stays on this PC: the model runs locally and nothing you type is sent anywhere." />
 
                     <TextBlock Text="This PC" Style="{StaticResource Heading}" />
                     <CheckBox x:Name="GpuBox" Content="Run the model on the graphics card" Margin="0,0,0,0" />
                     <TextBlock Style="{StaticResource Help}" Text="Off: the CPU only (slower, but leaves the graphics card alone)." />
                     <CheckBox x:Name="LoginBox" Content="Start OpenTypist when I sign in" />
+
+                    <TextBlock Text="Memory &amp; battery" Style="{StaticResource Heading}" />
+                    <StackPanel Orientation="Horizontal">
+                        <CheckBox x:Name="UnloadBox" Content="Unload the model when I'm not typing, after" VerticalAlignment="Center" Margin="0" />
+                        <ComboBox x:Name="IdleMinutesBox" Width="110" Margin="8,0,0,0" />
+                    </StackPanel>
+                    <TextBlock x:Name="UnloadHelp" Style="{StaticResource Help}" />
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="190" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="On battery" VerticalAlignment="Center" />
+                        <ComboBox x:Name="BatteryBox" Grid.Column="1" Width="280" Margin="0,2" />
+                        <TextBlock Grid.Row="1" Text="In battery saver" VerticalAlignment="Center" />
+                        <ComboBox x:Name="SaverBox" Grid.Row="1" Grid.Column="1" Width="280" Margin="0,2" />
+                        <TextBlock Grid.Row="2" Text="Smaller model" VerticalAlignment="Center" />
+                        <ComboBox x:Name="SmallerModelBox" Grid.Row="2" Grid.Column="1" Width="280" Margin="0,2" />
+                    </Grid>
+                    <StackPanel x:Name="SmallerMissingPanel" Orientation="Horizontal" Margin="0,4,0,0" Visibility="Collapsed">
+                        <TextBlock x:Name="SmallerMissingText" Foreground="DarkOrange" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="400" />
+                        <Button x:Name="DownloadSmallerButton" Margin="8,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <TextBlock x:Name="PowerNowText" Style="{StaticResource Help}" Margin="0,4,0,0" />
+
+                    <TextBlock Text="Updates" Style="{StaticResource Heading}" />
+                    <TextBlock x:Name="VersionText" />
+                    <CheckBox x:Name="CheckUpdatesBox" Content="Check for updates automatically" />
+                    <DockPanel Margin="0,8,0,0">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                            <Button x:Name="ReleaseNotesButton" Content="Release notes" Margin="12,0,0,0" />
+                            <Button x:Name="InstallUpdateButton" Content="Install and restart" Margin="8,0,0,0" />
+                            <Button x:Name="CheckNowButton" Content="Check now" Margin="12,0,0,0" />
+                        </StackPanel>
+                        <TextBlock x:Name="UpdateStatusText" TextWrapping="Wrap" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <TextBlock Style="{StaticResource Help}" Margin="0,4,0,0" Text="Updates come from the project's GitHub releases; checking sends nothing about you." />
+                </StackPanel>
+            </ScrollViewer>
+        </TabItem>
+        <TabItem Header="Personal">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="16,12,16,16">
+                    <TextBlock Text="Your profile" FontWeight="SemiBold" />
+                    <TextBlock Style="{StaticResource Help}" Margin="0,2,0,6"
+                               Text="OpenTypist reads this before every suggestion. Write facts about yourself and how you write, in the first person (&quot;I'm a nurse in Toronto. I keep texts short.&quot;), rather than instructions." />
+                    <TextBox x:Name="ProfileBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="110" MaxHeight="240"
+                             VerticalScrollBarVisibility="Auto" Padding="4" />
+                    <DockPanel Margin="0,4,0,0">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button x:Name="RevertProfileButton" Content="Revert" />
+                            <Button x:Name="SaveProfileButton" Content="Save" Margin="8,0,0,0" />
+                        </StackPanel>
+                        <TextBlock x:Name="ProfileCountText" VerticalAlignment="Center" Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}" />
+                    </DockPanel>
+                    <CheckBox x:Name="UseProfileBox" Content="Use my profile in suggestions" />
+                    <CheckBox x:Name="LockProfileBox" Content="Lock my profile (OpenTypist won't change it)" />
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <TextBlock Text="When OpenTypist learns something new" VerticalAlignment="Center" />
+                        <ComboBox x:Name="ProfileModeBox" Width="260" Margin="8,0,0,0" />
+                    </StackPanel>
+                    <DockPanel Margin="0,6,0,0">
+                        <Button x:Name="UpdateProfileButton" Content="Update now" DockPanel.Dock="Right" VerticalAlignment="Top" Margin="12,0,0,0" />
+                        <TextBlock Style="{StaticResource Help}" Margin="0"
+                                   Text="OpenTypist adds what it learns as lines at the end. If you edit or delete one of those lines, that topic is yours and OpenTypist stops touching it." />
+                    </DockPanel>
+                    <TextBlock x:Name="ProfileMessage" Style="{StaticResource Help}" Margin="0,4,0,0" />
+
+                    <Border x:Name="ProposalPanel" Visibility="Collapsed" Margin="0,12,0,0" Padding="10" CornerRadius="4"
+                            BorderThickness="1" BorderBrush="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}">
+                        <StackPanel>
+                            <TextBlock Text="Suggested update" FontWeight="SemiBold" />
+                            <TextBlock x:Name="ProposalNoteText" Margin="0,2,0,6" />
+                            <TextBox x:Name="ProposalText" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0">
+                                <Button x:Name="DismissProposalButton" Content="Dismiss" />
+                                <Button x:Name="ApplyProposalButton" Content="Apply" Margin="8,0,0,0" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="History" Style="{StaticResource Heading}" />
+                    <StackPanel x:Name="HistoryPanel" />
+
+                    <TextBlock Text="Learned from your typing" Style="{StaticResource Heading}" />
+                    <CheckBox x:Name="LearnBox" Content="Learn from how I type" Margin="0" />
+                    <TextBlock Style="{StaticResource Help}"
+                               Text="Names, words the dictionary doesn't know, your spelling, greetings and sign-offs, and how casually you write in each app. Only keys you type are used, never text on screen, and only the counts are kept, encrypted on this PC." />
+                    <TextBlock Text="Names" Margin="0,10,0,2" />
+                    <WrapPanel x:Name="NamesPanel" />
+                    <TextBlock Text="Your words" Margin="0,8,0,2" />
+                    <WrapPanel x:Name="WordsPanel" />
+                    <StackPanel x:Name="LearnedLinesPanel" Margin="0,6,0,0" />
+                    <DockPanel Margin="0,8,0,0">
+                        <Button x:Name="ForgetLearnedButton" Content="Forget everything learned" DockPanel.Dock="Right" VerticalAlignment="Top" Margin="12,0,0,0" />
+                        <TextBlock x:Name="LearnedCountText" Style="{StaticResource Help}" Margin="0" VerticalAlignment="Center" />
+                    </DockPanel>
+
+                    <TextBlock Text="Never correct" Style="{StaticResource Heading}" />
+                    <TextBlock Style="{StaticResource Help}" Margin="0,0,0,4"
+                               Text="Autocorrect leaves these words alone. Words are added when you undo a fix with Backspace; your learned words above count too." />
+                    <WrapPanel x:Name="NeverCorrectPanel" />
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <TextBox x:Name="NeverCorrectBox" Width="200" Padding="2" />
+                        <Button x:Name="AddNeverCorrectButton" Content="Add" Margin="8,0,0,0" />
+                    </StackPanel>
+
+                    <TextBlock Text="Writing samples" Style="{StaticResource Heading}" />
+                    <CheckBox x:Name="SamplesBox" Content="Keep samples of my writing to match my style" Margin="0" />
+                    <TextBlock Style="{StaticResource Help}"
+                               Text="When you leave a text field or send a message, OpenTypist keeps what you wrote there (up to 600 characters) and shows the model a few recent samples from the same app, so suggestions sound like you. Samples are encrypted on this PC and never leave it. Apps you turned off, password fields, card numbers and long codes are never kept." />
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <TextBlock x:Name="SamplesCountText" VerticalAlignment="Center" />
+                        <Button x:Name="ShowSamplesButton" Content="Show samples..." Margin="12,0,0,0" />
+                        <Button x:Name="DeleteSamplesButton" Content="Delete all" Margin="8,0,0,0" />
+                    </StackPanel>
                 </StackPanel>
             </ScrollViewer>
         </TabItem>
@@ -99,10 +224,7 @@
                                Text="Plain misspelling-&gt;correction lists, or AutoHotkey scripts like AutoCorrect.ahk (the ::typo::fix lines; options *, ?, C and B0)." />
                     <TextBlock x:Name="ImportMessage" Style="{StaticResource Help}" Margin="0,4,0,0" />
 
-                    <TextBlock Text="Never correct" Style="{StaticResource Heading}" />
-                    <TextBlock Style="{StaticResource Help}" Margin="0,0,0,4" Text="Words you undid a correction for." />
-                    <ListBox x:Name="NeverCorrectList" Height="120" SelectionMode="Extended" />
-                    <Button x:Name="RemoveNeverCorrectButton" Content="Remove" HorizontalAlignment="Left" Margin="0,6,0,0" />
+                    <TextBlock Style="{StaticResource Help}" Margin="0,16,0,0" Text="Words that should never be corrected are in the Personal tab." />
                 </StackPanel>
             </ScrollViewer>
         </TabItem>
@@ -178,6 +300,26 @@
                     <StackPanel x:Name="ModelList" />
                 </ScrollViewer>
             </DockPanel>
+        </TabItem>
+        <TabItem Header="Stats">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="16,12,16,16">
+                    <TextBlock Text="Words accepted per day" FontWeight="SemiBold" />
+                    <StackPanel x:Name="StatTiles" Orientation="Horizontal" Margin="0,10,0,0" />
+                    <local:WordsChart x:Name="WordsChart" Height="170" Margin="0,12,0,0" />
+                    <TextBlock x:Name="ChartHoverText" Style="{StaticResource Help}" Margin="0,4,0,0" />
+                    <Grid x:Name="StatNumbers" Margin="0,16,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="220" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                        <Button x:Name="ResetStatsButton" Content="Reset statistics" />
+                        <TextBlock Style="{StaticResource Help}" Margin="12,4,0,0" Text="Only counts are stored, never the text you type." />
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
         </TabItem>
     </TabControl>
 </Window>
