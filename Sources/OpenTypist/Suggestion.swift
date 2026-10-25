@@ -61,7 +61,10 @@ enum PromptBuilder {
         /// The user's trailing space was removed from the prompt; the model
         /// output must then start with a space, which is dropped again.
         var strippedTrailingSpace: Bool
-        var healLastToken: Bool
+        /// The half-typed word at the caret, with the space before it, kept
+        /// out of `text`: the model's output must start with it (see
+        /// `LlamaEngine.complete`). Empty when the caret isn't mid-word.
+        var wordPrefix: String
     }
 
     static let maxContextCharacters = 1200
@@ -79,10 +82,20 @@ enum PromptBuilder {
             body.removeLast()
             stripped = true
         }
-        let heal = !stripped && (body.last?.isLetter ?? false)
+        var wordPrefix = ""
+        if !stripped, body.last?.isLetter == true {
+            let wordStart = body.lastIndex(where: { !$0.isLetter }).map { body.index(after: $0) } ?? body.startIndex
+            wordPrefix = String(body[wordStart...])
+            body = String(body[..<wordStart])
+            // The space before a word belongs to the word's token.
+            if body.last == " " {
+                body.removeLast()
+                wordPrefix = " " + wordPrefix
+            }
+        }
 
         let header = header(appName: appName, windowTitle: windowTitle, screenText: screenText, profile: profile, examples: examples)
-        return Prompt(text: header + body, strippedTrailingSpace: stripped, healLastToken: heal)
+        return Prompt(text: header + body, strippedTrailingSpace: stripped, wordPrefix: wordPrefix)
     }
 
     /// Context goes first so it stays a stable, cached prefix while the user
@@ -208,6 +221,18 @@ enum PromptBuilder {
         }
         while result.last?.isWhitespace == true { result.removeLast() }
         return result.contains(where: { $0.isLetter || $0.isNumber }) ? result : nil
+    }
+
+    /// Whether a suggestion that finishes the half-typed word before the caret
+    /// makes a real word ("tomor" + "row" yes, "tomor" + "ow" no). Suggestions
+    /// that start a new word, short words and capitalized ones (often names
+    /// the dictionary doesn't know) always pass.
+    static func makesRealWord(textBefore: String, suggestion: String, isKnown: (String) -> Bool) -> Bool {
+        guard textBefore.last?.isLetter == true, suggestion.first?.isLetter == true else { return true }
+        let typed = String(textBefore.reversed().prefix(while: \.isLetter).reversed())
+        let word = typed + String(suggestion.prefix(while: \.isLetter))
+        guard word.count >= 4, word.first?.isLowercase == true else { return true }
+        return isKnown(word)
     }
 
     /// Splits into words, each keeping its leading whitespace.

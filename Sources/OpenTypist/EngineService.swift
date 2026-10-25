@@ -104,7 +104,7 @@ final class EngineService {
             guard let output = engine.complete(
                 prompt: prompt.text,
                 maxTokens: request.length.maxTokens,
-                healLastToken: prompt.healLastToken,
+                requiredPrefix: prompt.wordPrefix,
                 minProbability: request.minProbability,
                 wordMinProbability: request.wordMinProbability,
                 shouldContinue: { self.isLatest(id) },

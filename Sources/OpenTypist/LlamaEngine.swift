@@ -155,10 +155,12 @@ final class LlamaEngine {
 
     /// Continues `prompt` greedily.
     ///
-    /// With `healLastToken`, the last prompt token is removed and the first
-    /// generated token is constrained to start with its bytes. This lets the
-    /// model finish a half-typed word ("I'm runn" -> "ing late") instead of
-    /// being stuck with an unnatural token split.
+    /// `requiredPrefix` is a half-typed word the user is in the middle of
+    /// (with the space before it), left out of `prompt`. The output must start
+    /// with it, so the model spells the whole word with its own tokens
+    /// ("I would really" + " appre" -> " appreciate") instead of continuing
+    /// an unnatural token split, which can misspell it ("appreaciate"). The
+    /// required bytes are not part of the returned text.
     ///
     /// `stop` is called with the text generated so far after every token and
     /// returns true to end generation. Generation also stops at the first
@@ -168,7 +170,7 @@ final class LlamaEngine {
     func complete(
         prompt: String,
         maxTokens: Int,
-        healLastToken: Bool,
+        requiredPrefix: String = "",
         minProbability: Float = 0,
         wordMinProbability: Float? = nil,
         shouldContinue: () -> Bool,
@@ -177,17 +179,14 @@ final class LlamaEngine {
         guard let ctx, vocab != nil else { return nil }
 
         var tokens = tokenize(prompt, addBOS: true)
-        var healPrefix: [UInt8] = []
-        if healLastToken, tokens.count > 2, let last = tokens.last {
-            let lastPiece = pieces[Int(last)]
-            // Only heal plain word pieces, never control tokens or empty pieces.
-            if !lastPiece.isEmpty, !llama_vocab_is_control(vocab, last) {
-                healPrefix = lastPiece
-                tokens.removeLast()
-            }
+        var required = Array(requiredPrefix.utf8)
+        if !required.isEmpty, tokens.count < 2 {
+            // Nothing before the word to go on: continue the plain text instead.
+            tokens = tokenize(prompt + requiredPrefix, addBOS: true)
+            required = []
         }
 
-        let limit = Int(contextSize) - maxTokens - 8
+        let limit = Int(contextSize) - maxTokens - required.count - 8
         if tokens.count > limit {
             tokens = [tokens[0]] + tokens.suffix(limit - 1)
         }
@@ -198,29 +197,43 @@ final class LlamaEngine {
         var hitLimit = true
         var generated: [GeneratedToken] = []
         var stoppedForConfidence = false
-        // Mid-word (token healing), the first pieces finish the typed word.
-        var finishingWord = !healPrefix.isEmpty
+        // Mid-word, the first pieces finish the typed word.
+        var finishingWord = !required.isEmpty
 
-        for step in 0..<maxTokens {
+        while generated.count < maxTokens {
             guard shouldContinue() else { return nil }
             guard let logits = llama_get_logits_ith(ctx, -1) else { hitLimit = false; break }
 
             var next: llama_token
             let probability: Float
-            if step == 0, !healPrefix.isEmpty {
-                // Confidence among the tokens that can finish the half-typed word.
-                guard let healed = bestToken(startingWith: healPrefix, logits: logits) else {
+            var piece: [UInt8]
+            if !required.isEmpty {
+                guard let choice = bestToken(matching: required, logits: logits) else {
                     hitLimit = false
                     break
                 }
-                next = healed.token
-                probability = healed.probability
+                next = choice.token
+                piece = pieces[Int(next)]
+                if piece.count < required.count {
+                    // Still inside what the user typed: nothing new to show yet.
+                    required.removeFirst(piece.count)
+                    let rc = withUnsafeMutablePointer(to: &next) {
+                        llama_decode(ctx, llama_batch_get_one($0, 1))
+                    }
+                    if rc != 0 { hitLimit = false; break }
+                    cached.append(next)
+                    continue
+                }
+                piece.removeFirst(required.count)
+                required = []
+                probability = choice.probability
             } else {
                 var maxValue: Float = 0
                 var maxIndex: vDSP_Length = 0
                 vDSP_maxvi(logits, 1, &maxValue, &maxIndex, vDSP_Length(nVocab))
                 next = llama_token(maxIndex)
                 probability = exp(maxValue - logSumExp(logits))
+                piece = pieces[Int(next)]
             }
 
             if llama_vocab_is_eog(vocab, next) || llama_vocab_is_control(vocab, next) {
@@ -228,10 +241,6 @@ final class LlamaEngine {
                 break
             }
 
-            var piece = pieces[Int(next)]
-            if step == 0, !healPrefix.isEmpty {
-                piece.removeFirst(min(healPrefix.count, piece.count))
-            }
             var token = GeneratedToken(bytes: piece, probability: probability)
             if finishingWord, token.startsNewWord { finishingWord = false }
             token.finishesWord = finishingWord
@@ -364,25 +373,36 @@ final class LlamaEngine {
         return maxValue + log(sum)
     }
 
-    /// Most likely token that starts with `prefix`, and its probability among
-    /// all such tokens.
-    private func bestToken(startingWith prefix: [UInt8], logits: UnsafeMutablePointer<Float>) -> (token: llama_token, probability: Float)? {
-        let first = prefix[0]
-        var best: llama_token?
-        var bestValue = -Float.infinity
-        var candidateLogits: [Float] = []
+    /// Most likely token that covers all of `required`, with its probability
+    /// among all covering tokens (how sure the model is about how the word
+    /// goes on). Only when no token covers it, as for a long half-typed word,
+    /// the most likely piece of it (probability 1: it was typed).
+    private func bestToken(matching required: [UInt8], logits: UnsafeMutablePointer<Float>) -> (token: llama_token, probability: Float)? {
+        let first = required[0]
+        var covering: llama_token?
+        var coveringValue = -Float.infinity
+        var coveringLogits: [Float] = []
+        var piece: llama_token?
+        var pieceValue = -Float.infinity
         for id in 0..<nVocab {
             let candidate = pieces[id]
-            guard candidate.count >= prefix.count, candidate.first == first, candidate.starts(with: prefix),
-                  !llama_vocab_is_control(vocab, llama_token(id)) else { continue }
-            candidateLogits.append(logits[id])
-            if logits[id] > bestValue {
-                best = llama_token(id)
-                bestValue = logits[id]
+            guard candidate.first == first, !llama_vocab_is_control(vocab, llama_token(id)) else { continue }
+            if candidate.count >= required.count {
+                guard candidate.starts(with: required) else { continue }
+                coveringLogits.append(logits[id])
+                if logits[id] > coveringValue {
+                    covering = llama_token(id)
+                    coveringValue = logits[id]
+                }
+            } else if required.starts(with: candidate), logits[id] > pieceValue {
+                piece = llama_token(id)
+                pieceValue = logits[id]
             }
         }
-        guard let best else { return nil }
-        let total = candidateLogits.reduce(Float(0)) { $0 + exp($1 - bestValue) }
-        return (best, 1 / total)
+        if let covering {
+            let total = coveringLogits.reduce(Float(0)) { $0 + exp($1 - coveringValue) }
+            return (covering, 1 / total)
+        }
+        return piece.map { ($0, 1) }
     }
 }

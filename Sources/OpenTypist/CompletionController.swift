@@ -201,21 +201,32 @@ final class CompletionController {
         let started = Date()
         var firstShownMs: Int?
         // Show each complete word as soon as it exists, then the final text.
-        let present: (String) -> Void = { [weak self] text in
-            guard let self, self.settings.enabled else { return }
+        // Returns whether it was shown.
+        let present: (String) -> Bool = { [weak self] text in
+            guard let self, self.settings.enabled else { return false }
+            guard PromptBuilder.makesRealWord(textBefore: before, suggestion: text, isKnown: {
+                SpellCheck.isValidWord($0) || Personalization.shared.isNeverCorrect($0)
+            }) else {
+                self.suggestion = nil
+                self.hideOverlay()
+                self.status.note("\(ctx.appName): dropped a suggestion that misspells the word being typed")
+                return false
+            }
             self.suggestion = Suggestion(textBefore: before, text: text, pid: ctx.pid)
             self.show(text, context: ctx, caret: caret)
             if firstShownMs == nil {
                 firstShownMs = Int(Date().timeIntervalSince(started) * 1000)
                 self.stats.recordShown()
             }
+            return true
         }
-        engine.complete(request, onPartial: present) { [weak self] text in
+        engine.complete(request, onPartial: { _ = present($0) }) { [weak self] text in
             guard let self else { return }
             let ms = Int(Date().timeIntervalSince(started) * 1000)
             if let text {
-                present(text)
-                self.status.note("\(ctx.appName): suggestion shown after \(firstShownMs ?? ms) ms, complete after \(ms) ms")
+                if present(text) {
+                    self.status.note("\(ctx.appName): suggestion shown after \(firstShownMs ?? ms) ms, complete after \(ms) ms")
+                }
             } else if firstShownMs == nil {
                 self.status.note("\(ctx.appName): the model had no good suggestion (\(ms) ms)")
             }

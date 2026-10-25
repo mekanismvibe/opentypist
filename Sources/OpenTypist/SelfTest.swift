@@ -81,7 +81,7 @@ enum SelfTest {
             reply += addition
             start = Date()
             let prompt = PromptBuilder.build(textBefore: reply, appName: "Mail", windowTitle: "Re: Lunch tomorrow?", screenText: thread)
-            let output = engine.complete(prompt: prompt.text, maxTokens: 20, healLastToken: prompt.healLastToken,
+            let output = engine.complete(prompt: prompt.text, maxTokens: 20, requiredPrefix: prompt.wordPrefix,
                                          shouldContinue: { true }, stop: { PromptBuilder.shouldStop($0, maxWords: 7) })
             let text = output.flatMap { PromptBuilder.clean($0.text, prompt: prompt, maxWords: 7, hitTokenLimit: $0.hitTokenLimit) }
             print("[\(ms(since: start)) ms] …\(reply.suffix(30).debugDescription) → \(text.debugDescription)")
@@ -143,6 +143,21 @@ enum SelfTest {
         precondition(PromptBuilder.streamingText("terested in th", prompt: midWord, maxWords: 7, textAfter: "") == "terested in")
         precondition(PromptBuilder.streamingText("terested in this", prompt: midWord, maxWords: 7, textAfter: " this job") == nil
                      || PromptBuilder.streamingText("terested in this job ", prompt: midWord, maxWords: 7, textAfter: " this job") == "terested in")
+
+        // A half-typed word leaves the prompt, with the space before it, and
+        // the model's output has to start with it.
+        let splitWord = PromptBuilder.build(textBefore: "that is very in", appName: nil, windowTitle: nil)
+        precondition(splitWord.text == "that is very" && splitWord.wordPrefix == " in")
+        let lineStart = PromptBuilder.build(textBefore: "Hi,\nTha", appName: nil, windowTitle: nil)
+        precondition(lineStart.text == "Hi,\n" && lineStart.wordPrefix == "Tha")
+        precondition(PromptBuilder.build(textBefore: "see you ", appName: nil, windowTitle: nil).wordPrefix.isEmpty)
+
+        // Finishing a half-typed word has to make a real word.
+        let known: (String) -> Bool = { ["tomorrow", "appreciate"].contains($0) }
+        precondition(PromptBuilder.makesRealWord(textBefore: "see you tomor", suggestion: "row at", isKnown: known))
+        precondition(!PromptBuilder.makesRealWord(textBefore: "see you tomor", suggestion: "ow at", isKnown: known))
+        precondition(PromptBuilder.makesRealWord(textBefore: "see you ", suggestion: "tomorow", isKnown: known))
+        precondition(PromptBuilder.makesRealWord(textBefore: "ask Prox", suggestion: "mox", isKnown: known))
 
         // Gemma 4 E2B moved to Q4_0; the earlier Q4_K_M file still counts.
         let gemma = ModelCatalog.model(id: "gemma-4-e2b")!
@@ -289,7 +304,7 @@ enum SelfTest {
                 for (before, truth) in cases {
                     positions += 1
                     let prompt = PromptBuilder.build(textBefore: before, appName: app, windowTitle: nil)
-                    guard let output = engine.complete(prompt: prompt.text, maxTokens: 20, healLastToken: prompt.healLastToken,
+                    guard let output = engine.complete(prompt: prompt.text, maxTokens: 20, requiredPrefix: prompt.wordPrefix,
                                                        shouldContinue: { true }, stop: { PromptBuilder.shouldStop($0, maxWords: 7) }) else { continue }
                     let midWord = !before.hasSuffix(" ")
                     let truthWords = words(truth)
@@ -318,7 +333,7 @@ enum SelfTest {
 
         // Finishing a half-typed word: 1–3 letters into longer words, scored
         // on whether the completed word shows up and is the right word.
-        var wordCases: [(prompt: PromptBuilder.Prompt, truth: String, output: LlamaEngine.Output)] = []
+        var wordCases: [(before: String, prompt: PromptBuilder.Prompt, truth: String, output: LlamaEngine.Output)] = []
         for (app, text) in corpus {
             let allWords = text.split(separator: " ").map(String.init)
             for i in 2..<allWords.count {
@@ -326,29 +341,33 @@ enum SelfTest {
                 for typedCount in 1...3 where target.count >= typedCount + 3 && target.allSatisfy(\.isLetter) {
                     let before = allWords[..<i].joined(separator: " ") + " " + String(allWords[i].prefix(typedCount))
                     let prompt = PromptBuilder.build(textBefore: before, appName: app, windowTitle: nil)
-                    guard prompt.healLastToken, let output = engine.complete(
-                        prompt: prompt.text, maxTokens: 20, healLastToken: true,
+                    guard !prompt.wordPrefix.isEmpty, let output = engine.complete(
+                        prompt: prompt.text, maxTokens: 20, requiredPrefix: prompt.wordPrefix,
                         shouldContinue: { true }, stop: { PromptBuilder.shouldStop($0, maxWords: 7) }) else { continue }
-                    wordCases.append((prompt, String(target.dropFirst(typedCount)), output))
+                    wordCases.append((before, prompt, String(target.dropFirst(typedCount)), output))
                 }
             }
         }
         print("\nFinishing the current word (\(wordCases.count) half-typed words)")
-        print("level      word threshold  completion shown  right word")
+        print("level      word threshold  completion shown  right word  dropped as misspelled")
         for level in ConfidenceLevel.allCases {
             for wordThreshold: Float in [level.minProbability, 0.15, 0.1, 0.06, 0.04, 0.02] where wordThreshold <= level.minProbability {
-                var shownWords = 0, rightWords = 0
+                var shownWords = 0, rightWords = 0, misspelled = 0
                 for item in wordCases {
                     let confident = PromptBuilder.confidentText(item.output.tokens, hitTokenLimit: item.output.hitTokenLimit,
                                                                 minProbability: level.minProbability, wordMinProbability: wordThreshold)
                     guard let suggestion = PromptBuilder.clean(confident.text, prompt: item.prompt, maxWords: 7, hitTokenLimit: confident.hitTokenLimit),
                           let completion = words(suggestion).first else { continue }
+                    guard PromptBuilder.makesRealWord(textBefore: item.before, suggestion: suggestion, isKnown: SpellCheck.isValidWord) else {
+                        misspelled += 1
+                        continue
+                    }
                     shownWords += 1
                     if completion == item.truth { rightWords += 1 }
                 }
-                print(String(format: "%-10@ %.2f            %5.1f%%            %5.1f%%", level.rawValue as NSString, wordThreshold,
+                print(String(format: "%-10@ %.2f            %5.1f%%            %5.1f%%      %d", level.rawValue as NSString, wordThreshold,
                              Double(shownWords) / Double(wordCases.count) * 100,
-                             shownWords > 0 ? Double(rightWords) / Double(shownWords) * 100 : 0))
+                             shownWords > 0 ? Double(rightWords) / Double(shownWords) * 100 : 0, misspelled))
             }
         }
 
@@ -369,7 +388,7 @@ enum SelfTest {
                         let start = Date()
                         var firstWord: Double?
                         let output = engine.complete(
-                            prompt: prompt.text, maxTokens: CompletionLength.medium.maxTokens, healLastToken: prompt.healLastToken,
+                            prompt: prompt.text, maxTokens: CompletionLength.medium.maxTokens, requiredPrefix: prompt.wordPrefix,
                             minProbability: level.minProbability, wordMinProbability: level.wordMinProbability,
                             shouldContinue: { true },
                             stop: { text in
@@ -450,7 +469,7 @@ enum SelfTest {
         let files = arguments.drop { $0 != "--complete" }.dropFirst()
         for file in files {
             guard let prompt = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
-            let output = engine.complete(prompt: prompt, maxTokens: 8, healLastToken: false,
+            let output = engine.complete(prompt: prompt, maxTokens: 8,
                                          shouldContinue: { true }, stop: { $0.contains("\n") && $0.count > 1 })
             print("\(URL(fileURLWithPath: file).lastPathComponent): \(output.map { $0.text.debugDescription } ?? "nil")")
         }
@@ -533,7 +552,7 @@ enum SelfTest {
             let prompt = PromptBuilder.build(textBefore: text, appName: "Mail", windowTitle: nil, profile: profile)
             if let profile { precondition(prompt.text.hasPrefix("About me:\n\(profile)"), "profile missing from prompt") }
             guard let engine else { continue }
-            let output = engine.complete(prompt: prompt.text, maxTokens: 6, healLastToken: false,
+            let output = engine.complete(prompt: prompt.text, maxTokens: 6,
                                          shouldContinue: { true }, stop: { $0.contains("\n") })
             print("  profile \(profile == nil ? "off" : "on "): \"…Cheers,\\n\" → \(output.map { $0.text.debugDescription } ?? "nil")")
         }
@@ -556,7 +575,7 @@ enum SelfTest {
         for chat in [false, true] {
             let prompt = PromptBuilder.build(textBefore: "hey are you free tonight? i was thinking we could", appName: "Messages", windowTitle: "Sam",
                                              profile: "I'm Alex.", examples: chat ? examples : [])
-            let output = engine.complete(prompt: prompt.text, maxTokens: 12, healLastToken: prompt.healLastToken,
+            let output = engine.complete(prompt: prompt.text, maxTokens: 12, requiredPrefix: prompt.wordPrefix,
                                          shouldContinue: { true }, stop: { PromptBuilder.shouldStop($0, maxWords: 7) })
             let text = output.flatMap { PromptBuilder.clean($0.text, prompt: prompt, maxWords: 7, hitTokenLimit: $0.hitTokenLimit) }
             print("  samples \(chat ? "on " : "off"): \"…i was thinking we could\" → \(text.debugDescription)")
@@ -612,7 +631,7 @@ enum SelfTest {
         guard let output = engine.complete(
             prompt: prompt.text,
             maxTokens: length.maxTokens,
-            healLastToken: prompt.healLastToken,
+            requiredPrefix: prompt.wordPrefix,
             shouldContinue: { true },
             stop: { PromptBuilder.shouldStop($0, maxWords: length.maxWords) }
         ) else { return nil }
