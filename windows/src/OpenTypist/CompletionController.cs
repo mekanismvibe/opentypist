@@ -7,7 +7,8 @@ namespace OpenTypist;
 
 /// Ties keystrokes, the focused text field, the model and the overlay
 /// together. A port of CompletionController.swift. Everything here runs on
-/// the UI thread except `HandleKeyOnHookThread`, which only reads `visible`.
+/// the UI thread except `TryAcceptOnHookThread` and `PostKeyDown`, which only
+/// read `visible` and post to the UI thread.
 public sealed class CompletionController
 {
     private readonly EngineService engine;
@@ -51,36 +52,48 @@ public sealed class CompletionController
 
     // Events
 
-    /// Hook thread: Tab, Shift+Tab and Esc while a suggestion is showing.
-    /// Returns true if the key was used (and must be swallowed). Everything
-    /// else is passed on to `HandleKeyDown` on the UI thread.
-    public bool HandleKeyOnHookThread(KeyEvent e)
+    /// Hook thread: the accept keys and Esc while a suggestion is showing.
+    /// Returns true if the key was used (and must be swallowed). Accepting
+    /// wins over autocorrect, which wins over normal typing (`PostKeyDown`).
+    public bool TryAcceptOnHookThread(KeyEvent e)
     {
         var current = visible;
-        if (current is not null)
+        if (current is null) return false;
+        // Both actions on the same key: the whole suggestion wins.
+        bool all = current.Keys.All.Matches(e);
+        if (all || current.Keys.Word.Matches(e))
         {
-            if (current.Keys.All.Matches(e))
-            {
-                dispatcher.BeginInvoke(() => AcceptFromHook(current, all: true));
-                return true;
-            }
-            if (current.Keys.Word.Matches(e))
-            {
-                dispatcher.BeginInvoke(() => AcceptFromHook(current, all: false));
-                return true;
-            }
-            if (e.Vk == VK_ESCAPE && !e.IsShortcut)
-            {
-                dispatcher.BeginInvoke(() =>
-                {
-                    Dismiss();
-                    suppressed = true;
-                });
-                return true;
-            }
+            // Swallowing the key of Alt+→ would leave a bare Alt tap, which
+            // opens the app's menu (and the accepted text would pick items).
+            if ((e.Alt && !e.AltGr) || e.Win) new InputBatch().MenuMask().SendFromHook();
+            dispatcher.BeginInvoke(() => AcceptFromHook(current, all));
+            return true;
         }
-        dispatcher.BeginInvoke(() => HandleKeyDown(e));
+        if (e.Vk == VK_ESCAPE && !e.IsShortcut)
+        {
+            dispatcher.BeginInvoke(() =>
+            {
+                Dismiss();
+                suppressed = true;
+            });
+            return true;
+        }
         return false;
+    }
+
+    /// Hook thread: a key that reaches the app.
+    public void PostKeyDown(KeyEvent e) => dispatcher.BeginInvoke(() => HandleKeyDown(e));
+
+    /// Autocorrect replaced text with keystrokes we don't see; re-read the
+    /// field once the app has applied them.
+    public void TextChangedExternally()
+    {
+        engine.CancelAll();
+        suggestion = null;
+        pendingAccept = null;
+        HideOverlay();
+        if (!settings.Enabled || !engine.IsReady) return;
+        ScheduleRefresh(120);
     }
 
     private void AcceptFromHook(Visible shown, bool all)
@@ -151,8 +164,10 @@ public sealed class CompletionController
         engine.CancelAll();
         int consumedBefore = suggestion.Text.Length - current.Text.Length;
         var inserted = chunk;
-        // Finishing the suggestion: optionally add a space so typing can go on.
-        if (chunk.Length >= current.Text.Length && settings.AcceptTrailingSpace && !char.IsWhiteSpace(inserted[^1]))
+        // Finishing the suggestion: optionally add a space so typing can go
+        // on, unless the text after the caret already starts with one.
+        if (chunk.Length >= current.Text.Length && settings.AcceptTrailingSpace && !char.IsWhiteSpace(inserted[^1])
+            && !(lastContext?.TextAfterOnLine is { Length: > 0 } after && char.IsWhiteSpace(after[0])))
         {
             inserted += " ";
         }
@@ -160,7 +175,8 @@ public sealed class CompletionController
         TextInserter.Type(inserted);
         Accepted?.Invoke(inserted);
         var tail = suggestion.AnchorTail + suggestion.Text[..Math.Max(0, consumedBefore)] + inserted;
-        pendingAccept = (TextUtil.Suffix(tail, 40), 8);
+        // Text goes out a word at a time (see InputBatch), so allow ~0.8 s.
+        pendingAccept = (TextUtil.Suffix(tail, 40), 20);
         ScheduleRefresh(40);
     }
 
@@ -199,16 +215,15 @@ public sealed class CompletionController
         if (ctx.Caret is not Rect caret) { Skip($"{ctx.AppName}: the app doesn't report where the caret is"); return; }
 
         var before = ctx.TextBefore;
-        // Mid-line suggestions (a small card below the line) come in phase 2;
-        // until then, only suggest at the end of a line.
+        // In the middle of a line, suggest short insertions that lead into
+        // the text after the caret (never inside a word).
         bool midLine = ctx.TextAfterOnLine.Trim(' ', '\t').Length > 0;
         if (midLine)
         {
-            var next = ctx.TextAfterOnLine[0];
-            if (char.IsLetterOrDigit(next)) { Skip($"{ctx.AppName}: caret is inside a word"); return; }
-            Skip($"{ctx.AppName}: caret is in the middle of a line");
-            return;
+            if (!settings.MidLineSuggestions) { Skip($"{ctx.AppName}: caret is in the middle of a line"); return; }
+            if (char.IsLetterOrDigit(ctx.TextAfterOnLine[0])) { Skip($"{ctx.AppName}: caret is inside a word"); return; }
         }
+        var textAfter = midLine ? ctx.TextAfterOnLine : "";
         if (before.Length == 0 || before[^1] == '\n' || before.Trim().Length < 3)
         {
             Skip($"{ctx.AppName}: not enough text before the caret yet");
@@ -241,9 +256,10 @@ public sealed class CompletionController
             TextBefore = before,
             AppName = settings.UseAppContext ? ctx.AppName : null,
             WindowTitle = settings.UseAppContext ? ctx.WindowTitle : null,
-            Length = settings.Length,
+            Length = midLine ? CompletionLength.Short : settings.Length,
             MinProbability = settings.Confidence.MinProbability(),
             WordMinProbability = settings.Confidence.WordMinProbability(),
+            TextAfter = textAfter,
         };
         long readMs = started.ElapsedMilliseconds;
         AppStatus.Log($"refresh {generation}: {before.Length} chars before the caret, asking the model");
@@ -278,18 +294,64 @@ public sealed class CompletionController
 
     // Overlay
 
-    private void Show(string text, FocusContext ctx, Rect caret)
+    /// Bumped by every show and hide, so a show that waited for the obstacle
+    /// probe doesn't draw over something newer.
+    private int showSequence;
+
+    private async void Show(string text, FocusContext ctx, Rect caret)
     {
-        var keys = settings.AcceptKeys;
+        int sequence = ++showSequence;
+        var keys = settings.AcceptKeysFor(ctx.AppId);
+        // Mid-line, ghost text would sit on top of the text after the caret,
+        // so the suggestion goes in a small card just below the line.
+        bool bubble = ctx.TextAfterOnLine.Trim(' ', '\t').Length > 0;
+        var wrap = bubble ? null : await WrapGuideFor(text, ctx, caret, keys.Word.HintLabel);
+        if (sequence != showSequence) return;
         visible = new Visible(text, keys);
-        overlay.ShowSuggestion(text, caret, ctx.Style, keys.Word.HintLabel);
+        overlay.ShowSuggestion(text, caret, ctx.Style, keys.Word.HintLabel, wrap, bubble);
         AppStatus.Log($"overlay: {text.Length} chars at caret ({caret.X:0},{caret.Y:0} h {caret.Height:0}), " +
+                      (bubble ? "mid-line card, " : $"{overlay.LastLineCount} line(s){(wrap is null ? "" : $" wrapping at {wrap.RightEdge:0} from {wrap.LineStartX:0}")}, ") +
                       $"font {ctx.Style.FontFamily ?? "?"} {ctx.Style.FontSizePx?.ToString("0.0") ?? "?"} px reported, {overlay.LastFontSizePx:0.0} px drawn " +
                       $"(zoom sample {ctx.Style.Sample?.Length ?? 0} chars, {ctx.Style.SampleWidthPx?.ToString("0") ?? "?"} px)");
     }
 
+    /// Where the first non-field element (a button) sits on the caret's
+    /// line, so the screen isn't probed on every keystroke.
+    private (string Key, double? X, double CheckedTo)? obstacleCache;
+
+    /// Where multi-line fields wrap: the field's right edge (less the same
+    /// padding it has on the left), or earlier if a button sits on the line.
+    /// Single-line fields scroll instead of wrapping, so they get none.
+    private async Task<WrapGuide?> WrapGuideFor(string text, FocusContext ctx, Rect caret, string hint)
+    {
+        if (ctx.SingleLine || ctx.ElementFrame is not Rect frame) return null;
+        double lineStart = ctx.LineStartX ?? frame.Left + 4;
+        double padding = Math.Clamp(lineStart - frame.Left, 2, 40);
+        double right = Math.Min(frame.Right - padding, WorkAreaAt((int)caret.X, (int)caret.Y).Right - 4);
+
+        double needed = Math.Min(right, caret.Right + OverlayWindow.WidthPx(text, caret, ctx.Style, hint));
+        var key = $"{ctx.ProcessId}:{frame}:{(int)((caret.Top + caret.Bottom) / 2)}";
+        double? obstacle;
+        if (obstacleCache is { } cache && cache.Key == key && (cache.X is not null || cache.CheckedTo >= needed))
+        {
+            obstacle = cache.X;
+        }
+        else
+        {
+            bool sameLine = obstacleCache?.Key == key;
+            double from = sameLine ? Math.Max(caret.Right, obstacleCache!.Value.CheckedTo) : caret.Right;
+            double checkedBefore = sameLine ? obstacleCache!.Value.CheckedTo : 0;
+            obstacle = await reader.ObstacleXAsync(ctx, from, needed);
+            obstacleCache = (key, obstacle, Math.Max(needed, checkedBefore));
+            if (obstacle is not null) AppStatus.Note($"{ctx.AppName}: wrapping the suggestion before a button");
+        }
+        if (obstacle is double x) right = Math.Min(right, x - 6);
+        return right - lineStart > 40 ? new WrapGuide(lineStart, right) : null;
+    }
+
     private void HideOverlay()
     {
+        showSequence++;
         visible = null;
         overlay.HideSuggestion();
     }

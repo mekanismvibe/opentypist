@@ -32,7 +32,11 @@ public sealed record FocusContext(
     TextStyle Style,
     /// The text field's frame in physical screen pixels.
     Rect? ElementFrame,
-    bool SingleLine);
+    bool SingleLine,
+    /// Screen x where lines of text start in this field (for wrapping).
+    double? LineStartX = null,
+    /// The field's UI Automation element; only for `FocusReader` calls.
+    object? Element = null);
 
 public sealed record FocusResult(FocusContext? Context, string? Failure);
 
@@ -184,8 +188,91 @@ public sealed class FocusReader : IDisposable
             style = style with { Sample = sample, SampleWidthPx = width };
         }
         bool singleLine = controlType is UIA_EditControlTypeId or UIA_ComboBoxControlTypeId && !IsMultiLine(element);
+        double? lineStart = singleLine || caretRect is not Rect c ? null : LineStartX(caret, c, before);
 
-        return new FocusResult(new FocusContext(pid, app.Id, app.Name, windowTitle, role, before, after, caretRect, style, frame, singleLine), null);
+        return new FocusResult(new FocusContext(pid, app.Id, app.Name, windowTitle, role, before, after, caretRect, style, frame,
+                                                singleLine, lineStart, element), null);
+    }
+
+    /// Left edge of the caret's visual line: its first character, so wrapped
+    /// ghost text lines up with real text. Tries the line as UI Automation
+    /// sees it, then the hard line (since the last line break); each only if
+    /// that first character sits on the caret's line.
+    private static double? LineStartX(IUIAutomationTextRange caret, Rect caretRect, string before)
+    {
+        bool OnCaretLine(Rect r) => Math.Abs((r.Top + r.Bottom) / 2 - (caretRect.Top + caretRect.Bottom) / 2) < caretRect.Height * 0.6;
+
+        try
+        {
+            var line = caret.Clone();
+            line.ExpandToEnclosingUnit(TextUnit.TextUnit_Line);
+            var first = line.Clone();
+            first.MoveEndpointByRange(TextPatternRangeEndpoint.TextPatternRangeEndpoint_End, line, TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start);
+            first.MoveEndpointByUnit(TextPatternRangeEndpoint.TextPatternRangeEndpoint_End, TextUnit.TextUnit_Character, 1);
+            if (FirstRect(first) is Rect r && r.Width < 200 && OnCaretLine(r) && r.Left <= caretRect.Left + 1) return r.Left;
+
+            int onLine = before.Length - (before.LastIndexOf('\n') + 1);
+            if (onLine > 0)
+            {
+                var hard = caret.Clone();
+                hard.MoveEndpointByUnit(TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start, TextUnit.TextUnit_Character, -onLine);
+                hard.MoveEndpointByRange(TextPatternRangeEndpoint.TextPatternRangeEndpoint_End, hard, TextPatternRangeEndpoint.TextPatternRangeEndpoint_Start);
+                hard.MoveEndpointByUnit(TextPatternRangeEndpoint.TextPatternRangeEndpoint_End, TextUnit.TextUnit_Character, 1);
+                if (FirstRect(hard) is Rect h && h.Width < 200 && OnCaretLine(h)) return h.Left;
+            }
+            else
+            {
+                // The caret is at the start of its line.
+                return caretRect.Left;
+            }
+        }
+        catch (COMException) { }
+        return null;
+    }
+
+    /// Screen x of the first thing to the right of the caret on its line that
+    /// isn't part of the text field, such as a send or emoji button, probing
+    /// every 10 px from `fromX` to `toX` (at most ~60 ms).
+    public Task<double?> ObstacleXAsync(FocusContext context, double fromX, double toX)
+    {
+        var done = new TaskCompletionSource<double?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        queue.Add(() =>
+        {
+            try { done.SetResult(ObstacleX(context, fromX, toX)); }
+            catch (Exception) { done.SetResult(null); }
+        });
+        return done.Task;
+    }
+
+    private double? ObstacleX(FocusContext context, double fromX, double toX)
+    {
+        if (automation is null || context.Element is not IUIAutomationElement field || context.Caret is not Rect caret || toX <= fromX) return null;
+        int y = (int)Math.Round((caret.Top + caret.Bottom) / 2);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        for (double x = fromX + 4; x <= toX && clock.ElapsedMilliseconds < 60; x += 10)
+        {
+            IUIAutomationElement? hit;
+            try { hit = automation.ElementFromPoint(new tagPOINT { x = (int)x, y = y }); }
+            catch (COMException) { continue; }
+            if (hit is null || hit.CurrentProcessId == Environment.ProcessId) continue;
+            if (!IsPart(hit, field)) return x;
+        }
+        return null;
+    }
+
+    /// Whether `element` is `field` or inside it (web text fields contain
+    /// text children).
+    private bool IsPart(IUIAutomationElement element, IUIAutomationElement field)
+    {
+        var walker = automation!.RawViewWalker;
+        IUIAutomationElement? current = element;
+        for (int i = 0; i < 6 && current is not null; i++)
+        {
+            if (automation.CompareElements(current, field) != 0) return true;
+            try { current = walker.GetParentElement(current); }
+            catch (COMException) { return false; }
+        }
+        return false;
     }
 
     private static string RoleName(int controlType) => controlType switch
