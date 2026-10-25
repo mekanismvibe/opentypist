@@ -17,6 +17,8 @@ struct ModelInfo: Identifiable, Equatable {
     let minMemoryGB: Int
     let speed: String
     let quality: String
+    /// Earlier files of the same model that still count as downloaded.
+    var legacyFileNames: [String] = []
 
     var url: URL {
         URL(string: "https://huggingface.co/\(repo)/resolve/\(revision)/\(fileName)")!
@@ -31,7 +33,7 @@ enum ModelCatalog {
     static let all: [ModelInfo] = [
         ModelInfo(
             id: "qwen3-1.7b", name: "Qwen 3 1.7B", family: "Alibaba Qwen 3",
-            summary: "Smallest and fastest. Good for 8 GB Macs or when battery life matters most.",
+            summary: "Smallest and fastest: about 45% quicker per keystroke than Gemma 4 E2B, slightly less accurate. Good for 8 GB or older Macs, or to save battery.",
             repo: "mradermacher/Qwen3-1.7B-Base-i1-GGUF", revision: "c11e7b148b8e7ee59a63cc8faa90b842e25e8942",
             fileName: "Qwen3-1.7B-Base.i1-Q4_K_M.gguf", size: 1_107_409_248,
             sha256: "b3aac3227132b11e0ea8c818569f27c053ebde24d0b8530f3bd476e7ff33ee20",
@@ -40,10 +42,13 @@ enum ModelCatalog {
         ModelInfo(
             id: "gemma-4-e2b", name: "Gemma 4 E2B", family: "Google Gemma 4",
             summary: "The default. Fast, natural suggestions on most Apple silicon Macs.",
+            // Q4_0 rather than Q4_K_M: same measured suggestion quality
+            // (`--calibrate`), a few percent faster on Apple GPUs, slightly smaller.
             repo: "mradermacher/gemma-4-E2B-i1-GGUF", revision: "a9bf638e53783fc93778f357cc5c672eab5393b1",
-            fileName: "gemma-4-E2B.i1-Q4_K_M.gguf", size: 3_427_862_240,
-            sha256: "3cc0e9c2b4bbffea7f3f6cfe1ffd1591f4dafe02c43f78952f1142a24172df65",
-            minMemoryGB: 8, speed: "Fast", quality: "Better"
+            fileName: "gemma-4-E2B.i1-Q4_0.gguf", size: 3_362_502_368,
+            sha256: "50dffdea1974b389a70909510c27634030c420a5a32a5a7ee620ff11aa4fd43d",
+            minMemoryGB: 8, speed: "Fast", quality: "Better",
+            legacyFileNames: ["gemma-4-E2B.i1-Q4_K_M.gguf"]
         ),
         ModelInfo(
             id: "gemma-4-e4b", name: "Gemma 4 E4B", family: "Google Gemma 4",

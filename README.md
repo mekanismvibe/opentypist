@@ -27,8 +27,8 @@ their SHA-256:
 
 | Model | Size | Recommended for |
 | --- | --- | --- |
-| Qwen 3 1.7B | 1.1 GB | 8 GB Macs, longest battery life |
-| Gemma 4 E2B | 3.4 GB | 16 GB Macs (and base-chip Macs up to 24 GB); the default |
+| Qwen 3 1.7B | 1.1 GB | 8 GB or older Macs, longest battery life; about 45% faster per keystroke than Gemma 4 E2B, finishes half-typed words right 82% of the time vs 87% |
+| Gemma 4 E2B | 3.4 GB | 16 GB Macs (and base-chip Macs up to 24 GB); the default. Q4_0 format: same measured quality as Q4_K_M, a few percent faster on Apple GPUs (an existing Q4_K_M download keeps working) |
 | Gemma 4 E4B | 5.3 GB | 24 GB+ on Pro/Max chips, 32 GB+ otherwise |
 | Qwen 3 8B | 5.0 GB | 16 GB+, if you prefer a dense model |
 | Gemma 4 26B A4B | 16.8 GB | 64 GB+ |
@@ -170,6 +170,10 @@ Input Monitoring.
 - Per-app disable list (terminals, IDEs and password managers are off by
   default), plus a "Disable in <current app>" toggle in the menu bar
 - Local stats: words accepted, keystrokes saved, accept rate
+- Streaming: a suggestion appears as soon as its first word is complete and
+  grows word by word. On an M5 at "Balanced" the first word is ready in about
+  30 ms (44 ms for the slowest 10%), against 58 ms / 143 ms for the whole
+  suggestion; Tab accepts what's visible even while the rest is coming
 - Confidence filter: a suggestion ends at the first word piece the model is
   unsure about (and a half-finished word goes with it), and nothing is shown
   if it's unsure from the start. Measured on sample messages with Gemma 4

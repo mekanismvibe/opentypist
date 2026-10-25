@@ -14,7 +14,7 @@ if arguments.contains("--update-test") {
     SelfTest.updateTest(arguments: arguments)
 }
 if arguments.contains("--calibrate") {
-    SelfTest.calibrate()
+    SelfTest.calibrate(arguments: arguments)
 }
 if arguments.contains("--complete") {
     SelfTest.completeFiles(arguments: arguments)

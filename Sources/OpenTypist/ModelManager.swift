@@ -27,7 +27,18 @@ final class ModelManager: NSObject, ObservableObject {
         return base.appendingPathComponent("OpenTypist/Models", isDirectory: true)
     }
 
-    func fileURL(for model: ModelInfo) -> URL { modelsDirectory.appendingPathComponent(model.fileName) }
+    /// Where a new download of `model` goes.
+    func downloadURL(for model: ModelInfo) -> URL { modelsDirectory.appendingPathComponent(model.fileName) }
+
+    /// The file to load: the current one, or an earlier file of the same
+    /// model that is already on disk (e.g. Gemma 4 E2B's former Q4_K_M).
+    func fileURL(for model: ModelInfo) -> URL {
+        for name in [model.fileName] + model.legacyFileNames {
+            let url = modelsDirectory.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        return downloadURL(for: model)
+    }
 
     func isDownloaded(_ model: ModelInfo) -> Bool { FileManager.default.fileExists(atPath: fileURL(for: model).path) }
 
@@ -102,7 +113,9 @@ final class ModelManager: NSObject, ObservableObject {
     }
 
     func delete(_ model: ModelInfo) {
-        try? FileManager.default.removeItem(at: fileURL(for: model))
+        for name in [model.fileName] + model.legacyFileNames {
+            try? FileManager.default.removeItem(at: modelsDirectory.appendingPathComponent(name))
+        }
         revision += 1
     }
 
@@ -136,7 +149,7 @@ final class ModelManager: NSObject, ObservableObject {
 
     private func verifyAndInstall(_ partial: URL, model: ModelInfo) {
         download = .verifying(modelID: model.id)
-        let destination = fileURL(for: model)
+        let destination = downloadURL(for: model)
         DispatchQueue.global(qos: .utility).async {
             let result = Result { try Self.verify(partial, model: model) }
             DispatchQueue.main.async {

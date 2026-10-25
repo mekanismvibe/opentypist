@@ -85,7 +85,9 @@ final class EngineService {
 
     /// Calls `completion` on the main thread with the cleaned suggestion, or
     /// nil if there is nothing worth showing. Not called if superseded.
-    func complete(_ request: Request, completion: @escaping (String?) -> Void) {
+    /// `onPartial` streams the suggestion as it grows, one complete word at a
+    /// time (on the main thread); `completion` then delivers the final text.
+    func complete(_ request: Request, onPartial: ((String) -> Void)? = nil, completion: @escaping (String?) -> Void) {
         let id = cancelAll()
         queue.async { [engine] in
             guard self.isLatest(id), engine.isLoaded else { return }
@@ -98,6 +100,7 @@ final class EngineService {
                 examples: request.examples
             )
             let maxWords = request.length.maxWords
+            var lastPartial: String?
             guard let output = engine.complete(
                 prompt: prompt.text,
                 maxTokens: request.length.maxTokens,
@@ -105,7 +108,15 @@ final class EngineService {
                 minProbability: request.minProbability,
                 wordMinProbability: request.wordMinProbability,
                 shouldContinue: { self.isLatest(id) },
-                stop: { PromptBuilder.shouldStop($0, maxWords: maxWords) }
+                stop: { text in
+                    if let onPartial,
+                       let partial = PromptBuilder.streamingText(text, prompt: prompt, maxWords: maxWords, textAfter: request.textAfter),
+                       partial != lastPartial {
+                        lastPartial = partial
+                        DispatchQueue.main.async { if self.isLatest(id) { onPartial(partial) } }
+                    }
+                    return PromptBuilder.shouldStop(text, maxWords: maxWords)
+                }
             ) else { return }
             let confident = PromptBuilder.confidentText(output.tokens, hitTokenLimit: output.hitTokenLimit,
                                                         minProbability: request.minProbability, wordMinProbability: request.wordMinProbability)
