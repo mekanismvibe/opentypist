@@ -27,7 +27,7 @@ their SHA-256:
 
 | Model | Size | Recommended for |
 | --- | --- | --- |
-| Qwen 3 1.7B | 1.1 GB | 8 GB or older Macs, longest battery life; about 45% faster per keystroke than Gemma 4 E2B, finishes half-typed words right 82% of the time vs 87% |
+| Qwen 3 1.7B | 1.1 GB | 8 GB or older Macs, longest battery life; about 45% faster per keystroke than Gemma 4 E2B, finishes half-typed words right 84% of the time vs 87% |
 | Gemma 4 E2B | 3.4 GB | 16 GB Macs (and base-chip Macs up to 24 GB); the default. Q4_0 format: same measured quality as Q4_K_M, a few percent faster on Apple GPUs (an existing Q4_K_M download keeps working) |
 | Gemma 4 E4B | 5.3 GB | 24 GB+ on Pro/Max chips, 32 GB+ otherwise |
 | Qwen 3 8B | 5.0 GB | 16 GB+, if you prefer a dense model |
@@ -180,10 +180,17 @@ Input Monitoring.
   E2B, "Balanced" shows a suggestion 74% of the time with 50% of suggested
   words right, against 91% / 26% with no filter; "Fewer, more accurate" shows
   ~55% of the time with ~73% right
-- Mid-word completion via token healing ("I'm very in" → "terested in"), with
-  its own looser confidence bar: finishing a half-typed word is right about
-  87–92% of the time, so it shows even when the words after it don't (98.7% of
-  half-typed words get completed at "Fewer, more accurate", up from 87.4%)
+- Mid-word completion ("I'm very in" → "terested in"): the half-typed word
+  leaves the prompt and the model's output has to start with it, so the model
+  spells the whole word with its own tokens ("appre" → "ciate", never
+  "appreaciate"), and a completion that doesn't make a real word is dropped.
+  It has its own looser confidence bar, so it shows even when the words after
+  it don't: with Gemma 4 E2B, 98–99% of half-typed words get a completion at
+  every level, and 87–88% of those are the right word
+- Works alongside macOS's own inline predictions (the gray text after the
+  caret in TextEdit, Notes, Mail and Messages): OpenTypist continues after
+  macOS's word, leaves Tab to macOS when it has nothing to add, and uses the
+  card below the line when the two disagree
 - Suggestions in the middle of a line, shown in a small card below the line
   so they don't cover the text after the caret, and trimmed to lead into that
   text instead of repeating it ("I'm very in| this job" → "terested in")
@@ -247,9 +254,6 @@ requirement of just its bundle identifier (`org.opentypist.OpenTypist`), so
 permission grants survive rebuilds. The trade-off: macOS would extend those
 grants to any ad-hoc-signed app using the same identifier. For anything you
 distribute, set `CODESIGN_IDENTITY` to a real certificate.
-
-If macOS's own inline predictions also show up, turn them off in System
-Settings → Keyboard → Text Input → Edit → "Show inline predictive text".
 
 ### Testing the engine without the UI
 
