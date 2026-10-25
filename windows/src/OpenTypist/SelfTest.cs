@@ -96,18 +96,27 @@ public static class SelfTest
         {
             const string sentence = "I wanted to follow up on our conversation from last week about the new project timeline";
             var latencies = new List<long>();
+            // Streaming: when the first complete word could be on screen.
+            var firstShown = new List<long>();
             var typed = new StringBuilder();
             Console.WriteLine(level is null ? "== Typing simulation" : $"== Typing simulation, {level.Value.Title()} filter");
             foreach (var c in sentence)
             {
                 typed.Append(c);
                 start.Restart();
-                var result = Suggest(engine, typed.ToString(), "Mail", "Follow up", CompletionLength.Medium, level);
+                long? first = null;
+                var result = Suggest(engine, typed.ToString(), "Mail", "Follow up", CompletionLength.Medium, level, _ => first ??= start.ElapsedMilliseconds);
                 latencies.Add(start.ElapsedMilliseconds);
+                if (result is not null) firstShown.Add(first ?? start.ElapsedMilliseconds);
                 if (c == ' ' && level is null) Console.WriteLine($"...{Quote(TextUtil.Suffix(typed.ToString(), 30))} -> {Quote(result)}");
             }
             latencies.Sort();
+            firstShown.Sort();
             Console.WriteLine($"per-keystroke latency: median {latencies[latencies.Count / 2]} ms, p90 {latencies[latencies.Count * 9 / 10]} ms, max {latencies[^1]} ms");
+            if (firstShown.Count > 0)
+            {
+                Console.WriteLine($"streaming, first word on screen ({firstShown.Count} suggestions): median {firstShown[firstShown.Count / 2]} ms, p90 {firstShown[firstShown.Count * 9 / 10]} ms");
+            }
             Console.WriteLine();
         }
 
@@ -150,6 +159,178 @@ public static class SelfTest
         return failures == 0 ? 0 : 1;
     }
 
+    /// `--calibrate [--model path.gguf] [--cpu]`: replays real-looking
+    /// messages word by word (and mid-word) and measures, for each confidence
+    /// threshold, how often a suggestion is shown and how often its first word
+    /// is what came next, how often half-typed words are finished right, and
+    /// per-keystroke latency as the app runs it. A port of `calibrate` in
+    /// SelfTest.swift, with the same corpus.
+    public static int Calibrate(string[] args)
+    {
+        var settings = AppSettings.Load();
+        string? path = Argument(args, "--model") ?? new ModelManager().ActiveModelPath(settings.SelectedModelId, settings.CustomModelPath);
+        using var engine = new LlamaEngine();
+        try
+        {
+            if (path is null) throw new EngineException("No model");
+            engine.Load(path, useGpu: !args.Contains("--cpu"));
+        }
+        catch (EngineException e)
+        {
+            Console.WriteLine(e.Message);
+            return 1;
+        }
+        engine.WarmUp();
+        Console.WriteLine($"model: {Path.GetFileName(path)} ({engine.ModelDescription}) on the {(engine.UsesGpu ? "GPU" : "CPU")}");
+        (string App, string Text)[] corpus =
+        [
+            ("Mail", "Hi Sarah, thanks for getting back to me so quickly. I'm running a few minutes late, so please start the meeting without me. I will join as soon as I can and catch up on the notes afterwards."),
+            ("Mail", "Dear hiring manager, I am writing to express my interest in the software engineer position at your company. I have five years of experience building web applications and I would love the opportunity to talk with you."),
+            ("Messages", "hey are you still coming to the party tonight? i was thinking we could get dinner first if you want. let me know what time works for you"),
+            ("Slack", "Quick update on the release: the build is green and QA signed off this morning. I will tag the new version after lunch, so let me know if anything else needs to go in before then."),
+            ("Messages", "thanks so much for helping me move today, i really appreciate it. let me know when you want to grab a beer and i will pay"),
+            ("Notes", "Things to do this weekend: clean the garage, call mom about the trip, pick up groceries for the week and finish reading the book for book club."),
+            ("Mail", "Thank you for your order. Your package has been shipped and should arrive within three to five business days. If you have any questions, please contact our support team."),
+        ];
+        float[] thresholds = [0, 0.05f, 0.08f, 0.12f, 0.16f, 0.2f, 0.25f, 0.3f, 0.4f, 0.5f];
+        var shown = new int[thresholds.Length];
+        var firstRight = new int[thresholds.Length];
+        var wordsRight = new int[thresholds.Length];
+        var wordsShown = new int[thresholds.Length];
+        int positions = 0;
+
+        static List<string> Words(string s) =>
+            s.ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Select(TextUtil.TrimPunctuation).ToList();
+        static string Join(IEnumerable<string> words) => string.Join(" ", words);
+
+        foreach (var (app, text) in corpus)
+        {
+            var allWords = text.Split(' ');
+            for (int i = 2; i < allWords.Length; i++)
+            {
+                // At a word boundary, and (for longer words) two letters in.
+                var cases = new List<(string Before, string Truth)> { (Join(allWords[..i]) + " ", Join(allWords[i..])) };
+                if (allWords[i].Length >= 5)
+                {
+                    cases.Add((Join(allWords[..i]) + " " + allWords[i][..2], allWords[i][2..] + " " + Join(allWords[(i + 1)..])));
+                }
+                foreach (var (before, truth) in cases)
+                {
+                    positions++;
+                    var prompt = PromptBuilder.Build(before, app, null);
+                    var output = engine.Complete(prompt.Text, 20, prompt.HealLastToken, () => true, t => PromptBuilder.ShouldStop(t, 7));
+                    if (output is null) continue;
+                    bool midWord = !before.EndsWith(' ');
+                    var truthWords = Words(truth);
+                    for (int t = 0; t < thresholds.Length; t++)
+                    {
+                        var confident = PromptBuilder.ConfidentText(output.Tokens, output.HitTokenLimit, thresholds[t]);
+                        if (PromptBuilder.Clean(confident.Text, prompt, 7, confident.HitTokenLimit) is not string suggestion) continue;
+                        // Mid-word, the first suggested "word" finishes the typed one.
+                        var suggested = Words(midWord ? suggestion.TrimStart() : suggestion);
+                        if (suggested.Count == 0) continue;
+                        shown[t]++;
+                        wordsShown[t] += suggested.Count;
+                        if (suggested[0] == truthWords.FirstOrDefault()) firstRight[t]++;
+                        wordsRight[t] += suggested.Zip(truthWords).TakeWhile(p => p.First == p.Second).Count();
+                    }
+                }
+            }
+        }
+        Console.WriteLine($"positions: {positions}");
+        Console.WriteLine("threshold  shown   first word right   correct words / shown words");
+        for (int t = 0; t < thresholds.Length; t++)
+        {
+            double coverage = shown[t] * 100.0 / positions;
+            double precision = shown[t] > 0 ? firstRight[t] * 100.0 / shown[t] : 0;
+            double wordPrecision = wordsShown[t] > 0 ? wordsRight[t] * 100.0 / wordsShown[t] : 0;
+            Console.WriteLine($"  {thresholds[t]:0.00}     {coverage,5:0.0}%   {precision,5:0.0}%             {wordPrecision,5:0.0}%");
+        }
+
+        // Finishing a half-typed word: 1-3 letters into longer words, scored
+        // on whether the completed word shows up and is the right word.
+        var wordCases = new List<(PromptBuilder.Prompt Prompt, string Truth, LlamaEngine.Output Output)>();
+        foreach (var (app, text) in corpus)
+        {
+            var allWords = text.Split(' ');
+            for (int i = 2; i < allWords.Length; i++)
+            {
+                var target = TextUtil.TrimPunctuation(allWords[i]).ToLowerInvariant();
+                for (int typedCount = 1; typedCount <= 3; typedCount++)
+                {
+                    if (target.Length < typedCount + 3 || !target.All(char.IsLetter)) continue;
+                    var before = Join(allWords[..i]) + " " + allWords[i][..typedCount];
+                    var prompt = PromptBuilder.Build(before, app, null);
+                    if (!prompt.HealLastToken) continue;
+                    var output = engine.Complete(prompt.Text, 20, true, () => true, t => PromptBuilder.ShouldStop(t, 7));
+                    if (output is not null) wordCases.Add((prompt, target[typedCount..], output));
+                }
+            }
+        }
+        Console.WriteLine($"\nFinishing the current word ({wordCases.Count} half-typed words)");
+        Console.WriteLine("level      word threshold  completion shown  right word");
+        foreach (var level in Enum.GetValues<ConfidenceLevel>())
+        {
+            foreach (var wordThreshold in new[] { level.MinProbability(), 0.15f, 0.1f, 0.06f, 0.04f, 0.02f }.Where(w => w <= level.MinProbability()))
+            {
+                int shownWords = 0, rightWords = 0;
+                foreach (var item in wordCases)
+                {
+                    var confident = PromptBuilder.ConfidentText(item.Output.Tokens, item.Output.HitTokenLimit, level.MinProbability(), wordThreshold);
+                    if (PromptBuilder.Clean(confident.Text, item.Prompt, 7, confident.HitTokenLimit) is not string suggestion) continue;
+                    var completion = Words(suggestion).FirstOrDefault();
+                    if (completion is null) continue;
+                    shownWords++;
+                    if (completion == item.Truth) rightWords++;
+                }
+                Console.WriteLine($"{level.ToString().ToLowerInvariant(),-10} {wordThreshold:0.00}            {shownWords * 100.0 / wordCases.Count,5:0.0}%            {(shownWords > 0 ? rightWords * 100.0 / shownWords : 0),5:0.0}%");
+            }
+        }
+
+        // Latency as the app runs it: medium length, early stop at each level.
+        // "first word" is when the first complete word exists, which is the
+        // earliest a streaming display can show something.
+        Console.WriteLine("\nLatency per keystroke (medium length, app settings)");
+        Console.WriteLine("level      tokens/keystroke  total median  total p90  first word median  first word p90");
+        foreach (var level in Enum.GetValues<ConfidenceLevel>())
+        {
+            var totals = new List<double>();
+            var firsts = new List<double>();
+            var tokenCounts = new List<int>();
+            foreach (var (app, text) in corpus)
+            {
+                var allWords = text.Split(' ');
+                for (int i = 2; i < allWords.Length; i++)
+                {
+                    var befores = new List<string> { Join(allWords[..i]) + " " };
+                    if (allWords[i].Length >= 5) befores.Add(Join(allWords[..i]) + " " + allWords[i][..2]);
+                    foreach (var before in befores)
+                    {
+                        var prompt = PromptBuilder.Build(before, app, null);
+                        var clock = Stopwatch.StartNew();
+                        double? firstWord = null;
+                        var output = engine.Complete(prompt.Text, CompletionLength.Medium.MaxTokens(), prompt.HealLastToken, () => true, t =>
+                        {
+                            if (firstWord is null && PromptBuilder.FirstCompleteWord(t, prompt) is not null) firstWord = clock.Elapsed.TotalMilliseconds;
+                            return PromptBuilder.ShouldStop(t, CompletionLength.Medium.MaxWords());
+                        }, level.MinProbability(), level.WordMinProbability());
+                        double total = clock.Elapsed.TotalMilliseconds;
+                        if (output is null) continue;
+                        totals.Add(total);
+                        firsts.Add(firstWord ?? total);
+                        tokenCounts.Add(output.Tokens.Count);
+                    }
+                }
+            }
+            totals.Sort();
+            firsts.Sort();
+            Console.WriteLine($"{level.ToString().ToLowerInvariant(),-10} {tokenCounts.Average(),5:0.0}             {totals[totals.Count / 2],6:0.0} ms     {totals[totals.Count * 9 / 10],6:0.0} ms   " +
+                              $"{firsts[firsts.Count / 2],6:0.0} ms          {firsts[firsts.Count * 9 / 10],6:0.0} ms");
+        }
+        engine.Unload();
+        return 0;
+    }
+
     public static int RunOffline(string[] args)
     {
         OfflineChecks();
@@ -167,9 +348,11 @@ public static class SelfTest
             return 1;
         }
         var models = new ModelManager();
-        if (models.IsDownloaded(model))
+        // The catalog's current file; an earlier format on disk (Gemma 4 E2B
+        // Q4_K_M) doesn't count here, so this also fetches the new one.
+        if (File.Exists(models.DownloadPathFor(model)))
         {
-            Console.WriteLine($"{model.Name} is already downloaded: {models.FileFor(model)}");
+            Console.WriteLine($"{model.Name} is already downloaded: {models.DownloadPathFor(model)}");
             return 0;
         }
         int lastPercent = -1;
@@ -186,8 +369,8 @@ public static class SelfTest
         };
         Console.WriteLine($"Downloading {model.Name} ({model.SizeText}) from {model.Url}");
         models.StartDownload(model).Wait();
-        if (!models.IsDownloaded(model)) return 1;
-        Console.WriteLine($"Done: {models.FileFor(model)} (choose it in Settings > Model, or pass --model to --selftest)");
+        if (!File.Exists(models.DownloadPathFor(model))) return 1;
+        Console.WriteLine($"Done: {models.DownloadPathFor(model)} (choose it in Settings > Model, or pass --model to --selftest)");
         return 0;
     }
 
@@ -211,6 +394,36 @@ public static class SelfTest
         Check(PromptBuilder.ConfidentText(finishing, false, 0.45f).Text.Length == 0, "finishing strict");
         Check(PromptBuilder.ConfidentText(finishing, false, 0.45f, 0.15f).Text == "terested", "finishing loose");
         Check(PromptBuilder.ConfidentText(finishing, false, 0.15f, 0.1f).Text == "terested in the", "finishing all");
+
+        // Streaming shows complete words only, cleaned like a final suggestion.
+        var afterSpace = PromptBuilder.Build("so ", null, null);
+        Check(PromptBuilder.StreamingText(" I'll be th", afterSpace, 7, "") == "I'll be", "stream drops the growing word");
+        Check(PromptBuilder.StreamingText(" I'll", afterSpace, 7, "") is null, "stream waits for the first word");
+        Check(PromptBuilder.StreamingText(" I'll be there.", afterSpace, 7, "") == "I'll be there.", "stream ends at punctuation");
+        var inWord = PromptBuilder.Build("very in", null, null);
+        Check(PromptBuilder.StreamingText("terested in th", inWord, 7, "") == "terested in", "stream mid-word");
+        Check(PromptBuilder.StreamingText("terested in this", inWord, 7, " this job") is null
+              || PromptBuilder.StreamingText("terested in this job ", inWord, 7, " this job") == "terested in", "stream mid-line");
+        Check(PromptBuilder.FirstCompleteWord(" I'll be", afterSpace) == "I'll" && PromptBuilder.FirstCompleteWord(" I'l", afterSpace) is null, "first complete word");
+
+        // Gemma 4 E2B moved to Q4_0; the earlier Q4_K_M file still counts.
+        var gemma = ModelCatalog.Model("gemma-4-e2b")!;
+        Check(gemma.FileName.Contains("Q4_0") && gemma.FileNames.Contains("gemma-4-E2B.i1-Q4_K_M.gguf"), "E2B Q4_0 with Q4_K_M as legacy");
+        var legacyDir = Path.Combine(Path.GetTempPath(), $"opentypist-selftest-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(legacyDir);
+        try
+        {
+            var manager = new ModelManager(legacyDir);
+            Check(!manager.IsDownloaded(gemma), "nothing downloaded yet");
+            File.WriteAllText(Path.Combine(legacyDir, "gemma-4-E2B.i1-Q4_K_M.gguf"), "");
+            Check(manager.IsDownloaded(gemma) && manager.FileFor(gemma).EndsWith("Q4_K_M.gguf")
+                  && manager.DownloadPathFor(gemma).EndsWith("Q4_0.gguf"), "legacy file loads, new downloads use Q4_0");
+            File.WriteAllText(Path.Combine(legacyDir, gemma.FileName), "");
+            Check(manager.FileFor(gemma).EndsWith("Q4_0.gguf"), "the current file wins over the legacy one");
+            manager.Delete(gemma);
+            Check(!manager.IsDownloaded(gemma), "delete removes both files");
+        }
+        finally { Directory.Delete(legacyDir, true); }
 
         // Mid-line: lead into the text after the caret, don't repeat it.
         Check(PromptBuilder.FitBefore(" this job.", "terested in this job") == "terested in", "fit this job");
@@ -271,7 +484,8 @@ public static class SelfTest
         Console.WriteLine($"FAILED: {name}");
     }
 
-    private static string? Suggest(LlamaEngine engine, string text, string? app, string? title, CompletionLength length, ConfidenceLevel? level = null)
+    private static string? Suggest(LlamaEngine engine, string text, string? app, string? title, CompletionLength length, ConfidenceLevel? level = null,
+                                   Action<string>? onPartial = null)
     {
         var request = new EngineService.Request
         {
@@ -282,7 +496,7 @@ public static class SelfTest
             MinProbability = level?.MinProbability() ?? 0,
             WordMinProbability = level?.WordMinProbability(),
         };
-        return EngineService.Run(engine, request, () => true, out _);
+        return EngineService.Run(engine, request, () => true, out _, onPartial);
     }
 
     private static string? Argument(string[] args, string name)

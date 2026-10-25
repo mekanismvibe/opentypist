@@ -15,6 +15,7 @@ public static class Program
         if (args.Contains("--selftest-offline")) { AttachConsole(); return SelfTest.RunOffline(args); }
         if (args.Contains("--selftest")) { AttachConsole(); return SelfTest.Run(args); }
         if (args.Contains("--download")) { AttachConsole(); return SelfTest.Download(args); }
+        if (args.Contains("--calibrate")) { AttachConsole(); return SelfTest.Calibrate(args); }
 
         // One instance; opening the app again shows Settings, the way back in
         // when the tray icon is hidden in the overflow area.
