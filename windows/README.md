@@ -33,8 +33,8 @@ the updater, and CI and release jobs.
   it never accepts a new suggestion you haven't seen.
 - **Fields left alone**: passwords; one-line sign-in and verification
   fields (a label, placeholder or id asking for an email, username, phone,
-  PIN, code or card number, or an email address being typed), where
-  autocorrect and learning pause too; and in Outlook (classic and new) and
+  PIN, code or card number, or an email address or a number being typed),
+  where autocorrect and learning pause too; and in Outlook (classic and new) and
   Windows Mail, the To, Cc and Subject fields, where Tab moves to the next
   field.
 - **Autocorrect**, like the Mac app: Wikipedia's list of common misspellings
@@ -245,6 +245,31 @@ second or two of a model load that starts right after switching to Notepad
 are lost (2 to 4 keys, in all 5 tries with "Unload when idle"). The keyboard hook
 passes every key on time (logged), Edge loses none, and Notepad loses none
 when another process loads the model; not solved yet.
+
+### Mac fixes from 0.3.2 and 0.3.3
+
+Whole-word healing, sign-in fields, the Tab gap, the junk filter and smart
+quotes, ported from the Mac (e2630e4, 0443048). `--calibrate`, finishing the
+half-typed word at More (230 words): Gemma 4 E2B Q4_0 86.5% → 87.4%, Qwen 3
+1.7B 82.1% → 83.5% (the Mac: 85.7% → 87.3% and 82.1% → 83.5%), latency
+unchanged.
+
+| Live test (test store) | Result |
+| --- | --- |
+| Notepad: `that is very in`, `see you tomor`, `I would really appre`, Tab | `interesting`, `tomorrow`, `appreciate` |
+| Tab, Tab 40 ms apart inside a suggestion (Notepad) | two words; the second Tab waited for the rest |
+| Shift+Tab, then Tab 150 ms later (Notepad, Edge) | whole suggestion, no tab typed, focus stays |
+| Edge login page: email, username, 6-digit code fields | no suggestions (20 of 20 keys), `teh` not corrected, Tab moves on |
+| Notes box on the same page | suggestions as usual |
+
+Windows differences: Edge doesn't expose `type="email"`, `type="tel"`, `name`
+or `autocomplete="one-time-code"` through UI Automation, so code labels
+("6-digit code", "Enter code") and a value that is only a number count as
+well. The gap lasts its full 1.2 s even when no new suggestion comes (the
+Mac ends it then), so a Tab right after accepting the end of a sentence
+never types a tab. Word and Outlook aren't installed on the test PC, so
+smart quotes and the Outlook header fields are covered by the offline
+checks only.
 
 ## CI and releases
 

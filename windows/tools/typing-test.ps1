@@ -345,7 +345,8 @@ foreach ($step in $steps) {
     $before = Get-FieldText
     $gap = if ($step.Gap) { $step.Gap } else { $KeyDelay }
     if ($step.Type) { [TypingTest]::Type($step.Type, $KeyDelay) }
-    elseif ($step.Keys) {
+    # (ContainsKey: on a hashtable, .Keys is its own list of keys.)
+    elseif ($step.ContainsKey('Keys')) {
         foreach ($k in $step.Keys) { [TypingTest]::Press([uint16]$k.Key, [bool]$k.Shift); Start-Sleep -Milliseconds $gap }
     }
     else {
