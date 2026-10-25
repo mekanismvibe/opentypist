@@ -15,7 +15,8 @@ public static class FieldPolicy
     public static bool IsSignInField(bool singleLine, IEnumerable<string> labels, IEnumerable<string> identifiers, string value)
     {
         if (!singleLine) return false;
-        return labels.Any(LabelAsksForCredential) || identifiers.Any(IdentifierNamesCredential) || LooksLikeEmailBeingTyped(value);
+        return labels.Any(LabelAsksForCredential) || identifiers.Any(IdentifierNamesCredential)
+            || LooksLikeEmailBeingTyped(value) || LooksLikeNumberBeingTyped(value);
     }
 
     /// Phrases that, in a field's label or placeholder, ask for a credential.
@@ -25,6 +26,9 @@ public static class FieldPolicy
         "phone", "phone number", "mobile number", "password", "passcode", "pin", "otp", "2fa", "two-factor",
         "verification code", "security code", "confirmation code", "authentication code", "one-time code",
         "one time code", "card number", "cvc", "cvv", "expiry", "expiration date",
+        // Windows can't see autocomplete="one-time-code", so its usual labels count.
+        "enter code", "enter the code", "sms code", "text code", "login code", "sign-in code", "access code",
+        "one-time password", "one time password",
     ];
 
     /// Words that make a label about writing, not identity: "Email subject",
@@ -40,7 +44,9 @@ public static class FieldPolicy
         var words = Regex.Split(label.ToLowerInvariant(), @"[^\p{L}\p{N}-]+").Where(w => w.Length > 0).ToList();
         if (words.Count == 0 || words.Any(ProseWords.Contains)) return false;
         var padded = " " + string.Join(" ", words) + " ";
-        return CredentialPhrases.Any(p => padded.Contains($" {p} ", StringComparison.Ordinal));
+        if (CredentialPhrases.Any(p => padded.Contains($" {p} ", StringComparison.Ordinal))) return true;
+        // "6-digit code", "Enter the 4 digit code".
+        return Regex.IsMatch(padded, @" \d+(-| )digits? (code|pin|number) ");
     }
 
     /// Parts of a DOM or UI Automation id that name a credential: "user_email",
@@ -98,6 +104,13 @@ public static class FieldPolicy
     /// ("alice@", "alice@example.com"). A slash or colon before the "@"
     /// makes it a URL ("medium.com/@alice").
     public static bool LooksLikeEmailBeingTyped(string value) => EmailBeingTyped.IsMatch(value.Trim());
+
+    private static readonly Regex NumberBeingTyped = new(@"^\+?[\d][\d -]{2,}$", RegexOptions.Compiled);
+
+    /// The whole value is a number being typed: a code, phone or card number
+    /// ("123456", "+1 555 0100", "4111 1111"). Windows apps don't say a field
+    /// is type="tel" or a one-time code, and no suggestion helps there.
+    public static bool LooksLikeNumberBeingTyped(string value) => NumberBeingTyped.IsMatch(value.Trim());
 
     // Mail
 

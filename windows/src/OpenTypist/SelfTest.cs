@@ -923,6 +923,11 @@ public static class SelfTest
               "sign-in labels");
         Check(SignIn([], ["identifierId"]) && SignIn([], ["otp-input"]) && SignIn([], ["user_email"]) && SignIn([], ["txtPassword"]), "sign-in ids");
         Check(SignIn([], value: "alice@exa") && SignIn([], value: "alice@example.com"), "an email address being typed");
+        Check(SignIn(["6-digit code"]) && SignIn(["Enter the 4 digit code"]) && SignIn(["Enter code"]) && SignIn(["SMS code"]) && SignIn(["One-time password"]),
+              "verification code labels");
+        Check(SignIn([], value: "123456") && SignIn([], value: "+1 555 0100") && SignIn([], value: "4111 1111 1111") && !SignIn([], value: "12 apples")
+              && !SignIn([], value: "42"), "a number being typed");
+        Check(!SignIn(["Zip code"]) && !SignIn(["Discount code"]) && !SignIn(["Postal code"]), "codes that aren't credentials");
         Check(!SignIn(["Email subject"]) && !SignIn(["Search mail"], ["emailSearch"]) && !SignIn(["Promo code"]) && !SignIn(["Address and search bar"], ["view_1017"]),
               "writing fields that mention email or codes");
         Check(!SignIn(["Shipping address"], ["spinner-box"], "medium.com/@alice") && !SignIn(["Email"], singleLine: false), "URLs and multi-line fields");

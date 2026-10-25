@@ -239,7 +239,10 @@ public sealed class FocusReader : IDisposable
         if (newline >= 0) after = after[..newline];
         // Some apps report a non-breaking space for the trailing space.
         before = before.Replace((char)0xA0, ' ');
-        if (singleLine && FieldPolicy.LooksLikeEmailBeingTyped(before + after)) return SignInFieldSkipped(app.Name);
+        if (singleLine && (FieldPolicy.LooksLikeEmailBeingTyped(before + after) || FieldPolicy.LooksLikeNumberBeingTyped(before + after)))
+        {
+            return SignInFieldSkipped(app.Name);
+        }
 
         bool previousIsNewline = before.Length > 0 && before[^1] == '\n';
         var previousCharacter = caret.Clone();
