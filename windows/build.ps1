@@ -19,12 +19,16 @@ Also build the CUDA backend (needs the CUDA toolkit).
 
 .PARAMETER SkipNative
 Reuse the native DLLs from the last build.
+
+.PARAMETER Out
+Where the app goes (default build\windows\OpenTypist).
 #>
 param(
     [switch]$NoVulkan,
     [switch]$Cuda,
     [switch]$SkipNative,
-    [switch]$SkipApp
+    [switch]$SkipApp,
+    [string]$Out
 )
 $ErrorActionPreference = 'Stop'
 
@@ -33,7 +37,7 @@ $root = (Resolve-Path "$PSScriptRoot\..").Path
 # and the MSVC tools stop at 260 characters.
 $nativeBuild = Join-Path $root 'build\wn'
 $runtime = Join-Path $root 'build\wn\runtime'
-$out = Join-Path $root 'build\windows\OpenTypist'
+$out = if ($Out) { [IO.Path]::GetFullPath($Out) } else { Join-Path $root 'build\windows\OpenTypist' }
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 
 function Find-Tool($name, [scriptblock]$fallback) {
@@ -107,6 +111,8 @@ if (-not $SkipApp) {
 
     $dotnet = Find-Tool 'dotnet' { Join-Path $env:ProgramFiles 'dotnet\dotnet.exe' }
     Write-Host '== OpenTypist app'
+    $running = Get-Process OpenTypist -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($out, [StringComparison]::OrdinalIgnoreCase) }
+    if ($running) { throw "OpenTypist is running from $out. Quit it from its tray icon first, or build somewhere else with -Out." }
     if (Test-Path $out) { Remove-Item -Recurse -Force $out }
     Invoke-Checked $dotnet publish (Join-Path $PSScriptRoot 'src\OpenTypist\OpenTypist.csproj') -c Release -r win-x64 --self-contained true `
         -o $out "-p:NativeDir=$runtime\" "-p:AppIconPath=$icon" -nologo
