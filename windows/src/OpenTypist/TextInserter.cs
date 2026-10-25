@@ -283,7 +283,9 @@ public static class InputQueue
             {
                 try
                 {
+                    long started = System.Diagnostics.Stopwatch.GetTimestamp();
                     batch.Send();
+                    AppStatus.Log($"input: batch sent in {System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:0} ms");
                     // Keys held back behind a correction start a new word.
                     if (batch.EndsWord && Queue.Count > 0) Thread.Sleep(InputBatch.WordPauseMs);
                 }
