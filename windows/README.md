@@ -5,11 +5,43 @@ grey ghost-text suggestions after the caret in any app, accepted with Tab
 (next word) or Shift+Tab (whole suggestion), generated on your PC by a local
 GGUF model through llama.cpp. Nothing you type leaves the computer.
 
-**Status: phase 1** (engine, model download, ghost text, Tab / Shift+Tab, tray
-icon, minimal settings). Suggestions stream: they appear as soon as the first
-word is complete and grow word by word; Tab accepts what's visible. Autocorrect, snippets, per-app keys, the mid-line
-card and wrapping are phase 2; personalization, screen context, battery
-options, stats, the updater and CI/release are phase 3.
+**Status: phases 1 and 2.** Phase 1: engine, model download, ghost text,
+Tab / Shift+Tab, tray icon, settings. Suggestions stream: they appear as soon
+as the first word is complete and grow word by word; Tab accepts what's
+visible. Phase 2: autocorrect, snippets, accept keys per app, the mid-line
+card and wrapping. Phase 3 (personalization, screen context, battery
+options, stats, the updater and CI/release) is still to do.
+
+## What it does
+
+- **Suggestions** after the caret in the field's own font and a faded color,
+  wrapping like the field's text (up to 4 lines, before a send or emoji
+  button on the line). In the middle of a line (text after the caret), a
+  short suggestion in a small card below the line that leads into what
+  follows ("terested in" before " this job").
+- **Accept keys**: Tab (next word), Shift+Tab (whole suggestion), Esc
+  dismisses. Both can be changed in Settings, and per app in Settings → Apps
+  (for example → and Alt+→ where Tab does something else).
+- **Autocorrect**, like the Mac app: Wikipedia's list of common misspellings
+  (shared with the Mac app in `Resources/autocorrect`) fixes words as they
+  end; the model settles the cases the list can't (several possible fixes, a
+  "misspelling" that is also a real word, words the Windows spell checker
+  doesn't know). Backspace right after a fix undoes it, and that word is then
+  never corrected. Import more lists (`misspelling->fix` or AutoHotkey
+  `::typo::fix` scripts) in Settings → Autocorrect.
+- **Snippets**: a shortcut followed by a space or punctuation becomes its
+  text (`@@` → your email address), in every app; Backspace undoes it.
+- Personal data (snippets, the never-correct list) is encrypted with DPAPI
+  for your Windows account, in `%APPDATA%\OpenTypist\Personal`.
+
+How text gets typed matters on Windows, where apps read injected keys late
+when they are busy: characters go out as the keyboard layout's own keys
+(Unicode events only for characters the layout can't type, spaced out),
+words one at a time 30 ms apart (Notepad's spell check drops text that
+arrives right after a finished word), modifiers the user holds are released
+first, and swallowing the key of an Alt+→ accept presses an unassigned key
+so Windows doesn't open the app's menu. Keys typed while a correction is
+going out are held back and replayed after it.
 
 ## Build
 
@@ -66,11 +98,16 @@ a code-signing certificate: click "More info", then "Run anyway".
 `$env:OPENTYPIST_LOG = '1'` before starting the app writes the diagnostics
 (never typed text) to `%LOCALAPPDATA%\OpenTypist\log.txt`.
 
-`windows\tools\typing-test.ps1 -Target notepad|edge|edge-password [-ZoomSteps 3]`
+`windows\tools\typing-test.ps1 -Target notepad|edge|edge-password [-Scenario suggest|autocorrect|midline|wrap|appkeys] [-ZoomSteps 3]`
 types into Notepad or an Edge text area like a person (real key presses),
-accepts with Tab and Shift+Tab, and prints what the field contains, the app's
+accepts suggestions, and prints what the field contains, the app's
 diagnostics and screenshots (`edge-password` checks that a password field gets
-no suggestion). Don't touch the keyboard while it runs.
+no suggestion). Don't touch the keyboard while it runs; it stops if the test
+window or tab loses the focus.
+
+`$env:OPENTYPIST_TEST_STORE = 'C:\some\folder'` before starting the app keeps
+settings and personal data in that folder instead of `%APPDATA%\OpenTypist`,
+so tests never touch your own.
 
 ## Measured (phase 1, this PC)
 
@@ -111,6 +148,24 @@ The first start of a new build on a PC takes 20–35 s longer: the Vulkan
 driver compiles its GPU pipelines once (then caches them), which the app does
 while loading so the first keystroke doesn't wait.
 
+### Phase 2
+
+Checked with `tools/typing-test.ps1` in Notepad and an Edge text area:
+
+| Scenario | Result |
+| --- | --- |
+| Autocorrect: `Teh end. ` / `I think teh ` | `The end. ` / `I think the ` |
+| Backspace right after the fix | back to `teh`; typing `teh ` again leaves it |
+| Model fix: `I need to go to the stoer ` | `store` (a moment later) |
+| Snippet: `mail @@ ` | `mail me@example.com ` |
+| Mid-line: `I am very in` before ` this job.`, Shift+Tab | card below the line, then `I am very interested in this job.` |
+| Wrapping (Notepad, 34-character suggestion near the edge) | two lines, the second from the line start; Shift+Tab inserts all of it |
+| Per-app keys in Edge (→, Alt+→) | → takes the next word, Alt+→ the whole suggestion, no menu opens |
+| Password field | no suggestion (54 of 54 keystrokes skipped) |
+
+The Windows spell checker takes 0.44 ms per word (it runs in the keyboard
+hook at the end of each word); scoring candidates with the model 8–36 ms.
+
 ## Code map
 
 | Windows (`windows/src`) | Mac reference (`Sources/OpenTypist`) |
@@ -125,6 +180,11 @@ while loading so the first keystroke doesn't wait.
 | `OpenTypist/KeyboardHook.cs`, `TextInserter.cs` | `KeyboardMonitor.swift` |
 | `OpenTypist/OverlayWindow.cs` | `OverlayWindow.swift` |
 | `OpenTypist/AcceptKeys.cs` | `AcceptKeys.swift` |
+| `OpenTypist.Core/AutocorrectRules.cs`, `Typos.cs` | `AutocorrectRules.swift`, `SpellCheck` in `Autocorrector.swift` |
+| `OpenTypist/Autocorrector.cs`, `SpellCheck.cs` (Windows spell checker) | `Autocorrector.swift` |
+| `OpenTypist/TextReplacements.cs` | `TextReplacements.swift` |
+| `OpenTypist/SecureStore.cs` (DPAPI) | `SecureStore.swift` (Keychain) |
+| `OpenTypist/SettingsWindow*.cs` | `SettingsView.swift`, `ReplacementsSettingsView.swift` |
 | `OpenTypist/TrayApp.cs` | `AppDelegate.swift` |
 | `OpenTypist/SelfTest.cs` | `SelfTest.swift` |
 | `native/opentypist_native.c` | (shim for llama.h struct-by-value calls) |
