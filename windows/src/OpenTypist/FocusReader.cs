@@ -42,7 +42,9 @@ public sealed record FocusContext(
     /// The top-level window, for screen context.
     IntPtr Window = default);
 
-public sealed record FocusResult(FocusContext? Context, string? Failure);
+/// `SignInField`: the focused field asks for an email, username or code (see
+/// `FieldPolicy`), so autocorrect and learning stay out of it too.
+public sealed record FocusResult(FocusContext? Context, string? Failure, bool SignInField = false);
 
 /// Reads the focused text field with UI Automation (COM IUIAutomation) on a
 /// dedicated MTA thread, the Windows side of FocusReader.swift: text and caret
@@ -111,6 +113,39 @@ public sealed class FocusReader : IDisposable
 
     private FocusResult Fail(string reason) => new(null, reason);
 
+    private static FocusResult SignInFieldSkipped(string app) => new(null, $"{app}: sign-in or verification field, skipped", SignInField: true);
+
+    private const int UIA_FullDescriptionPropertyId = 30159;
+    private const int UIA_AriaPropertiesPropertyId = 30102;
+
+    /// The last field's answer: its labels don't change while it has the focus.
+    private (string FieldId, bool SignIn)? labelCache;
+
+    /// What the field says about itself (name, which carries a web field's
+    /// label, aria-label or placeholder; help text, which also carries the
+    /// placeholder; description; the labelling element; the id), checked
+    /// against `FieldPolicy`.
+    private bool LabelsAskForCredential(IUIAutomationElement element, string fieldId)
+    {
+        if (fieldId.Length > 0 && labelCache is { } cached && cached.FieldId == fieldId) return cached.SignIn;
+        var labels = new List<string>();
+        void Add(Func<string?> read)
+        {
+            try { if (read() is { Length: > 0 } text) labels.Add(text); }
+            catch (COMException) { }
+        }
+        Add(() => element.CurrentName);
+        Add(() => element.CurrentHelpText);
+        Add(() => element.GetCurrentPropertyValue(UIA_FullDescriptionPropertyId) as string);
+        Add(() => element.CurrentLabeledBy?.CurrentName);
+        var identifiers = new List<string>();
+        try { if (element.CurrentAutomationId is { Length: > 0 } id) identifiers.Add(id); }
+        catch (COMException) { }
+        bool signIn = FieldPolicy.IsSignInField(true, labels, identifiers, "");
+        labelCache = (fieldId, signIn);
+        return signIn;
+    }
+
     private FocusResult Read()
     {
         if (automation is null) return Fail("UI Automation isn't available");
@@ -142,6 +177,16 @@ public sealed class FocusReader : IDisposable
         string role = RoleName(controlType);
         // Never read or complete password fields.
         if (element.CurrentIsPassword != 0) return Fail($"{app.Name}: password field, skipped");
+
+        bool singleLine = controlType is UIA_EditControlTypeId or UIA_ComboBoxControlTypeId && !IsMultiLine(element);
+        if (FieldPolicy.IsMailHeaderField(app.Id, singleLine))
+        {
+            return Fail($"{app.Name}: address and subject fields are left to {app.Name}, where Tab moves between them");
+        }
+        string fieldId;
+        try { fieldId = element.GetRuntimeId() is int[] runtimeId ? string.Join(".", runtimeId) : ""; }
+        catch (COMException) { fieldId = ""; }
+        if (singleLine && LabelsAskForCredential(element, fieldId)) return SignInFieldSkipped(app.Name);
 
         var pattern2 = element.GetCurrentPattern(UIA_TextPattern2Id) as IUIAutomationTextPattern2;
         var pattern = pattern2 as IUIAutomationTextPattern ?? element.GetCurrentPattern(UIA_TextPatternId) as IUIAutomationTextPattern;
@@ -194,6 +239,7 @@ public sealed class FocusReader : IDisposable
         if (newline >= 0) after = after[..newline];
         // Some apps report a non-breaking space for the trailing space.
         before = before.Replace((char)0xA0, ' ');
+        if (singleLine && FieldPolicy.LooksLikeEmailBeingTyped(before + after)) return SignInFieldSkipped(app.Name);
 
         bool previousIsNewline = before.Length > 0 && before[^1] == '\n';
         var previousCharacter = caret.Clone();
@@ -207,12 +253,7 @@ public sealed class FocusReader : IDisposable
         {
             style = style with { Sample = sample, SampleWidthPx = width };
         }
-        bool singleLine = controlType is UIA_EditControlTypeId or UIA_ComboBoxControlTypeId && !IsMultiLine(element);
         double? lineStart = singleLine || caretRect is not Rect c ? null : LineStartX(caret, c, before);
-
-        string fieldId;
-        try { fieldId = element.GetRuntimeId() is int[] runtimeId ? string.Join(".", runtimeId) : ""; }
-        catch (COMException) { fieldId = ""; }
 
         return new FocusResult(new FocusContext(pid, app.Id, app.Name, windowTitle, role, before, after, caretRect, style, frame,
                                                 singleLine, lineStart, element, fieldId, hwnd), null);
@@ -312,12 +353,18 @@ public sealed class FocusReader : IDisposable
         _ => $"control type {controlType}",
     };
 
-    /// Win32 edit controls say whether they are multi-line in their style;
-    /// for others, a field much taller than a line is multi-line.
+    /// Browsers say whether a field is multi-line (Chromium's ARIA
+    /// properties: "multiline=false"); otherwise a field much taller than a
+    /// line is multi-line.
     private static bool IsMultiLine(IUIAutomationElement element)
     {
         try
         {
+            if (element.GetCurrentPropertyValue(UIA_AriaPropertiesPropertyId) is string aria)
+            {
+                if (aria.Contains("multiline=true", StringComparison.Ordinal)) return true;
+                if (aria.Contains("multiline=false", StringComparison.Ordinal)) return false;
+            }
             var rect = element.CurrentBoundingRectangle;
             return rect.bottom - rect.top > 60;
         }

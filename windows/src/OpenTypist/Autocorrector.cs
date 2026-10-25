@@ -36,6 +36,16 @@ public sealed class Autocorrector
     /// Raised on the UI thread after we changed the text.
     public event Action? TextChanged;
 
+    /// The focused field asks for an email, username or code (see
+    /// `FieldPolicy`): nothing gets corrected there or learned from it. Set on
+    /// the UI thread, read on the hook thread.
+    public bool InSignInField
+    {
+        get => Volatile.Read(ref inSignInField);
+        set => Volatile.Write(ref inSignInField, value);
+    }
+    private bool inSignInField;
+
     /// Text typed since the caret last jumped (click, arrows, shortcut).
     private string typed = "";
     private const int MaxTyped = 80;
@@ -176,7 +186,7 @@ public sealed class Autocorrector
     {
         lock (gate)
         {
-            if (!settings.Enabled || settings.IsDisabled(appId) || e.IsShortcut || (e.Alt && !e.AltGr))
+            if (!settings.Enabled || settings.IsDisabled(appId) || InSignInField || e.IsShortcut || (e.Alt && !e.AltGr))
             {
                 ResetLocked();
                 return false;

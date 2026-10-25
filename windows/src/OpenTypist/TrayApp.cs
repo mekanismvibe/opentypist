@@ -81,6 +81,7 @@ public sealed class TrayApp : IDisposable
         replacements = new TextReplacements(settings);
         autocorrector = new Autocorrector(engine, reader, settings, replacements, personal, samples, screen, stats);
         controller.Accepted += autocorrector.NoteInserted;
+        controller.SignInFieldChanged += signIn => autocorrector.InSignInField = signIn;
         autocorrector.TextChanged += controller.TextChangedExternally;
 
         // Order matters: accepting a suggestion wins over autocorrect, which
@@ -109,6 +110,8 @@ public sealed class TrayApp : IDisposable
         hook.Prepare = SpellCheck.Warm;
         if (hook.Start()) AppStatus.Note("Keyboard monitor started");
         else AppStatus.Note("Windows refused the keyboard hook");
+        // Suggestions check words on the UI thread (its own checkers).
+        dispatcher.BeginInvoke(SpellCheck.Warm, DispatcherPriority.ApplicationIdle);
 
         foregroundProc = OnForegroundChanged;
         foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, foregroundProc, 0, 0, WINEVENT_OUTOFCONTEXT);
