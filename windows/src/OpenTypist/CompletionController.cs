@@ -84,6 +84,7 @@ public sealed class CompletionController
         {
             if (!HoldInGap(e)) return false;
             if ((e.Alt && !e.AltGr) || e.Win) new InputBatch().MenuMask().SendFromHook();
+            AppStatus.Log("accept key held: the rest of the suggestion isn't on screen yet");
             return true;
         }
         // Both actions on the same key: the whole suggestion wins.
@@ -160,6 +161,7 @@ public sealed class CompletionController
                 held = acceptGap is { } gap && DateTime.UtcNow <= gap.Until;
                 if (held) acceptGap = acceptGap!.Value with { Held = all ? AcceptKind.All : AcceptKind.Word };
             }
+            AppStatus.Log($"accept key arrived after the suggestion changed: {(held ? "held for the rest" : "given back to the app")}");
             if (!held) TextInserter.Press(all ? shown.Keys.All.Vk : shown.Keys.Word.Vk);
             return;
         }
@@ -203,14 +205,21 @@ public sealed class CompletionController
     /// with the next keystroke, never from a click alone.
     public void HandleMouseDown() => Dismiss();
 
+    /// Drops the suggestion. Something the user did (typing, a click, Esc,
+    /// another app) also ends the gap after accepting.
     public void Dismiss()
+    {
+        DropSuggestion();
+        ClearGap();
+    }
+
+    private void DropSuggestion()
     {
         refreshTimer.Stop();
         refreshGeneration++;
         engine.CancelAll();
         suggestion = null;
         pendingAccept = null;
-        ClearGap();
         HideOverlay();
     }
 
@@ -219,7 +228,11 @@ public sealed class CompletionController
     private void Accept(string chunk)
     {
         var current = visible;
-        if (chunk.Length == 0 || suggestion is null || current is null) return;
+        if (chunk.Length == 0 || suggestion is null || current is null)
+        {
+            AppStatus.Log($"accept skipped ({(chunk.Length == 0 ? "nothing to insert" : suggestion is null ? "no suggestion" : "nothing on screen")})");
+            return;
+        }
         // Before the overlay goes down, so the hook thread always sees one or the other.
         lock (gapGate) acceptGap = (DateTime.UtcNow + AcceptGapLength, current.Keys, AcceptKind.None);
         // Accepting what's visible ends a suggestion that's still streaming.
@@ -235,6 +248,7 @@ public sealed class CompletionController
         }
         HideOverlay();
         TextInserter.Type(inserted);
+        AppStatus.Log($"accepted {(chunk.Length >= current.Text.Length ? "the whole suggestion" : "a word")}, {inserted.Length} chars");
         stats.RecordAccepted(inserted);
         Accepted?.Invoke(inserted);
         var tail = suggestion.AnchorTail + suggestion.Text[..Math.Max(0, consumedBefore)] + inserted;
@@ -253,10 +267,11 @@ public sealed class CompletionController
         refreshTimer.Start();
     }
 
+    /// Nothing to suggest here; the gap after accepting runs its course.
     private void Skip(string reason)
     {
         AppStatus.Note(reason);
-        Dismiss();
+        DropSuggestion();
     }
 
     private async Task Refresh()
@@ -367,8 +382,8 @@ public sealed class CompletionController
                 AppStatus.Note($"{ctx.AppName}: suggestion shown after {firstShownMs ?? ms} ms, complete after {ms} ms (reading the field {readMs} ms)");
                 return;
             }
-            // Nothing is coming: an accept key no longer needs holding.
-            ClearGap();
+            // Nothing is coming. The gap still runs its 1.2 s: a Tab right
+            // after accepting the end of a sentence mustn't type a tab.
             if (text is null && firstShownMs is null)
             {
                 AppStatus.Note($"{ctx.AppName}: the model had no good suggestion ({ms} ms, reading the field {readMs} ms)");
@@ -413,6 +428,7 @@ public sealed class CompletionController
             held = acceptGap?.Held ?? AcceptKind.None;
             acceptGap = null;
         }
+        if (held != AcceptKind.None) AppStatus.Log($"accept key held in the gap: {(continuing ? "carrying on" : "dropped, this suggestion is new")}");
         if (continuing && held == AcceptKind.All) Accept(text);
         else if (continuing && held == AcceptKind.Word) Accept(Suggestion.NextWord(text, settings.AcceptTrailingSpace));
         AppStatus.Log($"overlay: {text.Length} chars at caret ({caret.X:0},{caret.Y:0} h {caret.Height:0}), " +
