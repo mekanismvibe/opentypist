@@ -45,6 +45,10 @@ public sealed class KeyboardHook : IDisposable
 
     public static List<int> HeldModifiers() => TrackedModifiers.Where(vk => Volatile.Read(ref Held[vk])).ToList();
 
+    /// Runs on the hook thread before the hooks go in: set-up that is too
+    /// slow for a hook call (Windows gives up on a hook that takes too long).
+    public Action? Prepare { get; set; }
+
     public bool Start()
     {
         if (thread is not null) return IsRunning;
@@ -53,6 +57,8 @@ public sealed class KeyboardHook : IDisposable
         thread = new Thread(() =>
         {
             threadId = GetCurrentThreadId();
+            try { Prepare?.Invoke(); }
+            catch (Exception e) { AppStatus.Log($"keyboard hook set-up: {e.Message}"); }
             keyboardProc = KeyboardCallback;
             mouseProc = MouseCallback;
             var module = GetModuleHandle(null);

@@ -69,6 +69,10 @@ public static class SpellCheck
         return result;
     }
 
+    /// Creates this thread's checkers now: the first one can take seconds
+    /// on a PC that hasn't used the spell checker since it started.
+    public static void Warm() => Checkers();
+
     private static List<ISpellChecker> Checkers()
     {
         if (checkers is not null) return checkers;

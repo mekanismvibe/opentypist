@@ -202,13 +202,17 @@ public static class SelfTest
         Check(snippets.MatchAtEnd("x;addr") is null, "snippet must start a word");
         Check(AutocorrectRules.Backspaces("café") == 4 && AutocorrectRules.Backspaces("ok \U0001F44D") == 4, "backspaces per character");
 
-        // The Windows spell checker.
+        // The Windows spell checker. Starting it is timed on its own (the app
+        // does that before the keyboard hook goes in); each word must be fast.
         var clock = Stopwatch.StartNew();
+        SpellCheck.Warm();
+        double startMs = clock.Elapsed.TotalMilliseconds;
+        clock.Restart();
         bool loosingValid = SpellCheck.IsValidWord("loosing");
         for (int i = 0; i < 100; i++) SpellCheck.IsValidWord(i % 2 == 0 ? "becuase" : "because");
         double perWord = clock.Elapsed.TotalMilliseconds / 101;
         Console.WriteLine($"  spell languages: {string.Join(", ", SpellCheck.Languages)}; 'loosing' valid: {loosingValid}; " +
-                          $"'stoer' guesses: {string.Join(", ", SpellCheck.Guesses("stoer"))}; {perWord:0.00} ms per word");
+                          $"'stoer' guesses: {string.Join(", ", SpellCheck.Guesses("stoer"))}; {perWord:0.00} ms per word (starting it: {startMs:0} ms)");
         if (SpellCheck.Languages.Count > 0)
         {
             Check(SpellCheck.IsValidWord("because") && !SpellCheck.IsValidWord("becuase"), "spell checker knows because, not becuase");

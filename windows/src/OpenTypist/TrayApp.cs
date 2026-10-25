@@ -104,6 +104,9 @@ public sealed class TrayApp : IDisposable
                 completion.HandleMouseDown();
             });
         };
+        // Autocorrect and learning check words in the hook; start the spell
+        // checker there before the first word ends.
+        hook.Prepare = SpellCheck.Warm;
         if (hook.Start()) AppStatus.Note("Keyboard monitor started");
         else AppStatus.Note("Windows refused the keyboard hook");
 
