@@ -4,8 +4,9 @@ using static OpenTypist.Win32;
 
 namespace OpenTypist;
 
-/// A key press seen by the hook, with the modifiers held and the text it types.
-public sealed record KeyEvent(int Vk, uint ScanCode, bool Shift, bool Ctrl, bool Alt, bool Win, bool AltGr, string Text)
+/// A key press seen by the hook, with the modifiers held and the text it
+/// types. `IsDeadKey`: an accent key that combines with the next key.
+public sealed record KeyEvent(int Vk, uint ScanCode, bool Shift, bool Ctrl, bool Alt, bool Win, bool AltGr, string Text, bool IsDeadKey = false)
 {
     public static bool IsModifier(int vk) => vk is VK_SHIFT or VK_CONTROL or VK_MENU or VK_LSHIFT or VK_RSHIFT
         or VK_LCONTROL or VK_RCONTROL or VK_LMENU or VK_RMENU or VK_LWIN or VK_RWIN or VK_CAPITAL or VK_NUMLOCK or VK_SCROLL;
@@ -36,10 +37,18 @@ public sealed class KeyboardHook : IDisposable
 
     public bool IsRunning => keyboardHook != IntPtr.Zero;
 
+    private static readonly int[] TrackedModifiers = [VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN];
+    /// Which modifiers the user holds, from the keys the hook saw (our own
+    /// injected releases don't change it, unlike GetAsyncKeyState).
+    private static readonly bool[] Held = new bool[256];
+
+    public static List<int> HeldModifiers() => TrackedModifiers.Where(vk => Volatile.Read(ref Held[vk])).ToList();
+
     public bool Start()
     {
         if (thread is not null) return IsRunning;
         using var ready = new ManualResetEventSlim();
+        foreach (var vk in TrackedModifiers) Held[vk] = IsKeyDown(vk);
         thread = new Thread(() =>
         {
             threadId = GetCurrentThreadId();
@@ -78,6 +87,10 @@ public sealed class KeyboardHook : IDisposable
             {
                 int message = (int)wParam;
                 int vk = (int)info.vkCode;
+                if (vk < 256 && Array.IndexOf(TrackedModifiers, vk) >= 0)
+                {
+                    Volatile.Write(ref Held[vk], message is WM_KEYDOWN or WM_SYSKEYDOWN);
+                }
                 try
                 {
                     if (message is WM_KEYDOWN or WM_SYSKEYDOWN)
@@ -90,11 +103,29 @@ public sealed class KeyboardHook : IDisposable
                                 swallowed.Add(vk);
                                 return 1;
                             }
+                            // A correction is still waiting to be typed: this key
+                            // goes after it, not into the middle of it.
+                            if (InputQueue.IsBusy)
+                            {
+                                swallowed.Add(vk);
+                                var replay = new InputBatch();
+                                if (e.Text.Length == 1 && !e.IsShortcut) replay.Replay(e.Text[0]);
+                                else replay.Press(vk);
+                                InputQueue.Enqueue(replay);
+                                return 1;
+                            }
                         }
                     }
                     else if (message is WM_KEYUP or WM_SYSKEYUP)
                     {
                         if (swallowed.Remove(vk)) return 1;
+                        // Alt or Win let go while our keys are still going out
+                        // (the menu mask after an Alt+→ accept): after them.
+                        if (vk is VK_LMENU or VK_RMENU or VK_LWIN or VK_RWIN && InputQueue.IsBusy)
+                        {
+                            InputQueue.Enqueue(new InputBatch().Release(vk));
+                            return 1;
+                        }
                         if (!KeyEvent.IsModifier(vk)) OnKeyUp?.Invoke(Describe(vk, info.scanCode, typed: false));
                     }
                 }
@@ -121,11 +152,14 @@ public sealed class KeyboardHook : IDisposable
 
     private KeyEvent Describe(int vk, uint scanCode, bool typed = true)
     {
-        bool shift = IsKeyDown(VK_SHIFT), ctrl = IsKeyDown(VK_CONTROL), alt = IsKeyDown(VK_MENU);
-        bool win = IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
+        // Modifiers as this hook saw them: GetAsyncKeyState can lag behind
+        // the events a low-level hook gets.
+        bool shift = Held[VK_LSHIFT] || Held[VK_RSHIFT], ctrl = Held[VK_LCONTROL] || Held[VK_RCONTROL];
+        bool alt = Held[VK_LMENU] || Held[VK_RMENU], win = Held[VK_LWIN] || Held[VK_RWIN];
         // AltGr arrives as left Ctrl + right Alt.
-        bool altGr = IsKeyDown(VK_RMENU) && IsKeyDown(VK_LCONTROL);
+        bool altGr = Held[VK_RMENU] && Held[VK_LCONTROL];
         string text = "";
+        bool deadKey = false;
         if (typed && vk == VK_PACKET)
         {
             // Unicode input from on-screen keyboards, remote desktops and
@@ -144,9 +178,10 @@ public sealed class KeyboardHook : IDisposable
             // Flag 4: don't change the keyboard state (keeps dead keys working for the app).
             int n = ToUnicodeEx((uint)vk, scanCode, keyState, chars, chars.Capacity, 4, layout);
             if (n > 0) text = chars.ToString(0, Math.Min(n, chars.Length));
+            deadKey = n < 0;
             // Control characters (Tab, Enter, Backspace) aren't typed text here.
             if (text.Length > 0 && char.IsControl(text[0])) text = "";
         }
-        return new KeyEvent(vk, scanCode, shift, ctrl, alt, win, altGr, text);
+        return new KeyEvent(vk, scanCode, shift, ctrl, alt, win, altGr, text, deadKey);
     }
 }

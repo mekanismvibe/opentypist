@@ -143,6 +143,17 @@ internal static class Win32
     [DllImport("user32.dll")]
     public static extern IntPtr GetKeyboardLayout(uint idThread);
 
+    public const uint MAPVK_VK_TO_CHAR = 2;
+
+    [DllImport("user32.dll")]
+    public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    [DllImport("user32.dll")]
+    public static extern uint MapVirtualKeyEx(uint uCode, uint uMapType, IntPtr dwhkl);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern short VkKeyScanEx(char ch, IntPtr dwhkl);
+
     // Windows
 
     [DllImport("user32.dll")]
@@ -346,4 +357,20 @@ internal static class Win32
     }
 
     public static bool IsKeyDown(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
+
+    private static IntPtr lastForeground;
+    private static string? lastForegroundApp;
+
+    /// Lowercase executable name of the foreground window's app, cached per
+    /// window (cheap enough for the keyboard hook). Hook thread only.
+    public static string? ForegroundAppId()
+    {
+        var hwnd = GetForegroundWindow();
+        if (hwnd == lastForeground) return lastForegroundApp;
+        lastForeground = hwnd;
+        GetWindowThreadProcessId(hwnd, out int pid);
+        var path = ProcessImagePath(pid);
+        lastForegroundApp = path is null ? null : Path.GetFileName(path).ToLowerInvariant();
+        return lastForegroundApp;
+    }
 }
