@@ -153,11 +153,110 @@ public static class SelfTest
         Console.WriteLine();
         Console.WriteLine($"This PC: {hardware.Summary.Replace(" · ", ", ")} -> recommended {ModelCatalog.Recommended(hardware).Name}");
 
+        AutocorrectChecks(engine, args);
         OfflineChecks();
         // ggml's GPU backends can assert if the process exits with a model loaded.
         engine.Unload();
         return failures == 0 ? 0 : 1;
     }
+
+    /// List matching (optionally with `--ahk file.ahk`), the spell checker
+    /// and, with a model, how the model picks between spellings.
+    private static void AutocorrectChecks(LlamaEngine? engine, string[] args)
+    {
+        Console.WriteLine();
+        Console.WriteLine("== Autocorrect lists");
+        var rules = new AutocorrectRules();
+        if (Autocorrector.BuiltInListPath is string builtIn) Console.WriteLine($"built-in: {rules.LoadFile(builtIn)} entries");
+        else { failures++; Console.WriteLine("FAILED: built-in list not found"); }
+        if (Argument(args, "--ahk") is string ahk) Console.WriteLine($"ahk: {rules.LoadFile(ahk)} hotstrings");
+        string[] cases = ["I think teh", "Teh", "TEH", "becuase", "I recieved", "it was definately", "achive",
+                          "We need to redesign", "a foriegn", "I am designign", "he doe snot", "it was dispell"];
+        foreach (var text in cases)
+        {
+            var match = rules.MatchAtEnd(text) ?? rules.MatchImmediate(text);
+            Console.WriteLine($"  {Quote(text)} -> {Describe(match)}");
+        }
+        Console.WriteLine($"  conformCase: {AutocorrectRules.ConformCase("Teh", "the")}, edit(teh, the) = {Typos.EditDistance("teh", "the")}");
+        Check(rules.MatchAtEnd("I think teh") == new AutocorrectMatch.Fix("the", 3), "teh -> the");
+        Check(rules.MatchAtEnd("TEH") == new AutocorrectMatch.Fix("THE", 3), "TEH -> THE");
+        Check(rules.MatchAtEnd("Teh") == new AutocorrectMatch.Fix("The", 3), "Teh -> The");
+        Check(rules.MatchAtEnd("We need to redesign") is null, "redesign stays");
+        Check(rules.MatchAtEnd("achive") is AutocorrectMatch.Ambiguous { Candidates: ["achieve", "archive"] }, "achive is ambiguous");
+        Check(Typos.EditDistance("teh", "the") == 1 && Typos.AdjacentKeys('e', 'r') && !Typos.AdjacentKeys('t', 'e'), "edit distance and keyboard");
+        Check(Typos.TypoCost("recipt", "receipt") < Typos.TypoCost("recipt", "recipe"), "typo cost prefers a missed letter");
+
+        // AutoHotkey hotstrings.
+        var hotstrings = new AutocorrectRules();
+        int loaded = hotstrings.LoadAutoHotkey(string.Join("\n",
+            "; AutoCorrect.ahk style", "#Hotstring R", "::teh::the", ":*:btw::by the way", ":?:ign::ing", "::design::", ":C:US::United States",
+            ":B0:keep::kept", "::comment::with comment ; ignored", "/*", "::inside::block", "*/", "MsgBox, not a hotstring", "::fun::{Enter}"));
+        Console.WriteLine($"  ahk sample: {loaded} hotstrings");
+        Check(loaded == 6, "ahk: six hotstrings (B0, block comment, code and {keys} skipped)");
+        Check(hotstrings.MatchAtEnd("teh") == new AutocorrectMatch.Fix("the", 3), "ahk ::teh::the");
+        Check(hotstrings.MatchImmediate("btw") == new AutocorrectMatch.Fix("by the way", 3), "ahk * fires without an ending");
+        Check(hotstrings.MatchAtEnd("I am designign") == new AutocorrectMatch.Fix("ing", 3), "ahk ? fixes the end of a longer word");
+        Check(hotstrings.MatchAtEnd("design") is null, "ahk exception ::design::");
+        Check(hotstrings.MatchAtEnd("US") == new AutocorrectMatch.Fix("United States", 2) && hotstrings.MatchAtEnd("us") is null, "ahk C is case-sensitive");
+        Check(hotstrings.MatchAtEnd("comment") == new AutocorrectMatch.Fix("with comment", 7), "ahk ; comment stripped");
+
+        // Snippets insert exactly what was written.
+        var snippets = new AutocorrectRules();
+        snippets.Add(new AutocorrectRule("omw", "On my way!", Exact: true));
+        snippets.Add(new AutocorrectRule("@@", "me@example.com", Exact: true));
+        snippets.Add(new AutocorrectRule(";addr", "1 Main St\nSpringfield", Exact: true));
+        Check(snippets.MatchAtEnd("ok OMW") == new AutocorrectMatch.Fix("On my way!", 3), "snippet omw");
+        Check(snippets.MatchAtEnd("email: @@") == new AutocorrectMatch.Fix("me@example.com", 2), "snippet @@");
+        Check(snippets.MatchAtEnd("send to ;addr") == new AutocorrectMatch.Fix("1 Main St\nSpringfield", 5), "snippet ;addr");
+        Check(snippets.MatchAtEnd("x;addr") is null, "snippet must start a word");
+        Check(AutocorrectRules.Backspaces("café") == 4 && AutocorrectRules.Backspaces("ok \U0001F44D") == 4, "backspaces per character");
+
+        // The Windows spell checker.
+        var clock = Stopwatch.StartNew();
+        bool loosingValid = SpellCheck.IsValidWord("loosing");
+        for (int i = 0; i < 100; i++) SpellCheck.IsValidWord(i % 2 == 0 ? "becuase" : "because");
+        double perWord = clock.Elapsed.TotalMilliseconds / 101;
+        Console.WriteLine($"  spell languages: {string.Join(", ", SpellCheck.Languages)}; 'loosing' valid: {loosingValid}; " +
+                          $"'stoer' guesses: {string.Join(", ", SpellCheck.Guesses("stoer"))}; {perWord:0.00} ms per word");
+        if (SpellCheck.Languages.Count > 0)
+        {
+            Check(SpellCheck.IsValidWord("because") && !SpellCheck.IsValidWord("becuase"), "spell checker knows because, not becuase");
+            Check(perWord < 5, "spell check is fast enough for the keyboard hook");
+        }
+
+        if (engine is null) return;
+        Console.WriteLine();
+        Console.WriteLine("== Model picks (log-probabilities; first entry is what was typed)");
+        (string Context, string[] Candidates)[] picks =
+        [
+            ("I worked hard all year to", ["achive", "achieve", "archive"]),
+            ("Please remember to", ["achive", "achieve", "archive"]),
+            ("I keep", ["loosing", "losing"]),
+            ("The knot kept", ["loosing", "losing"]),
+            ("I need to go to the", ["stoer", "store", "stoner"]),
+            ("My friend", ["Jaxon", "Jason", "Saxon"]),
+            ("Can you send me the", ["recipt", "receipt", "recipe"]),
+        ];
+        foreach (var (context, candidates) in picks)
+        {
+            clock.Restart();
+            var prompt = PromptBuilder.ScoringPrompt(context + " ", "Messages", null, null);
+            var scores = engine.Score(prompt.Text, candidates.Select(c => prompt.WordPrefix + c).ToList()) ?? [];
+            var shown = candidates.Zip(scores).Select((pair, index) =>
+            {
+                double cost = index == 0 ? 0 : 2.0 * Typos.TypoCost(candidates[0], pair.First);
+                return $"{pair.First} {pair.Second:0.0}->{pair.Second - cost:0.0}";
+            });
+            Console.WriteLine($"[{clock.ElapsedMilliseconds} ms] {Quote(context)} -> {string.Join(", ", shown)}");
+        }
+    }
+
+    private static string Describe(AutocorrectMatch? match) => match switch
+    {
+        AutocorrectMatch.Fix f => $"fix({Quote(f.Replacement)}, {f.Length})",
+        AutocorrectMatch.Ambiguous a => $"ambiguous({Quote(a.Word)}: {string.Join(", ", a.Candidates)})",
+        _ => "nil",
+    };
 
     /// `--calibrate [--model path.gguf] [--cpu]`: replays real-looking
     /// messages word by word (and mid-word) and measures, for each confidence
@@ -333,6 +432,7 @@ public static class SelfTest
 
     public static int RunOffline(string[] args)
     {
+        AutocorrectChecks(null, args);
         OfflineChecks();
         return failures == 0 ? 0 : 1;
     }
@@ -473,6 +573,48 @@ public static class SelfTest
         }
         Check(ModelCatalog.Recommended(new HardwareInfo("", 32, "GPU", 12288)).Id == "gemma-4-e4b", "recommend 32 GB + 12 GB GPU");
         Check(ModelCatalog.Recommended(new HardwareInfo("", 32, null, 0)).Id == "gemma-4-e2b", "recommend CPU only");
+
+        // Ghost text wraps like real text: 7 px per character here.
+        static double Width(string t) => t.Length * 7;
+        var wrapped = OverlayWindow.Wrap("I'll be there in about 10 minutes.", Width, 70, 120);
+        Console.WriteLine($"Wrap (70 px, then 120 px lines): {string.Join(" | ", wrapped.Select(l => Quote(l)))}");
+        Check(wrapped.Count > 1 && wrapped.Skip(1).All(l => l.Length > 0 && !char.IsWhiteSpace(l[0])), "continuation lines start with a word");
+        Check(wrapped.All(l => Width(l) <= 120), "wrapped lines fit");
+        var noRoom = OverlayWindow.Wrap(" be there soon", Width, 5, 300);
+        Check(noRoom.Count == 2 && noRoom[0].Length == 0 && noRoom[1] == "be there soon", "no room after the caret: start on the next line");
+
+        // Accept keys per app.
+        var keySettings = new AppSettings();
+        keySettings.AppAcceptKeys["slack.exe"] = new AcceptKeys(KeyCombo.RightArrow, KeyCombo.AltRightArrow);
+        Check(keySettings.AcceptKeysFor("slack.exe").Word == KeyCombo.RightArrow && keySettings.AcceptKeysFor("notepad.exe") == AcceptKeys.Standard
+              && keySettings.AcceptKeysFor(null) == AcceptKeys.Standard, "per-app accept keys");
+        var json = System.Text.Json.JsonSerializer.Serialize(keySettings.AppAcceptKeys);
+        var back = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, AcceptKeys>>(json)!;
+        Check(back["slack.exe"] == keySettings.AppAcceptKeys["slack.exe"], "accept keys survive saving");
+        Check(keySettings.IsDisabled(Path.GetFileName(Environment.ProcessPath ?? "OpenTypist.exe").ToLowerInvariant()), "never in OpenTypist's own windows");
+
+        // Personal data is encrypted at rest (DPAPI), in a throwaway folder.
+        var folder = Path.Combine(Path.GetTempPath(), $"opentypist-selftest-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new SecureStore(folder);
+            var never = new NeverCorrect(store);
+            never.Remove("x");
+            var replacements = new TextReplacements(new AppSettings(), store);
+            Check(replacements.Add("@@", "me@example.com") is null && replacements.Add("@@", "again") is not null
+                  && replacements.Add("a b", "x") is not null && replacements.Add("sig.", "x") is not null, "snippet rules");
+            Check(replacements.Match("mail @@") == new AutocorrectMatch.Fix("me@example.com", 2), "snippet matches");
+            var raw = File.ReadAllBytes(Path.Combine(folder, "snippets.bin"));
+            Check(!System.Text.Encoding.UTF8.GetString(raw).Contains("example.com"), "snippets are encrypted");
+            Check(new TextReplacements(new AppSettings(), store).Snippets.Single().Expansion == "me@example.com", "snippets load again");
+            File.WriteAllBytes(Path.Combine(folder, "snippets.bin"), [1, 2, 3]);
+            Check(new TextReplacements(new AppSettings(), store).Snippets.Count == 0 && File.Exists(Path.Combine(folder, "snippets.bin.unreadable")),
+                  "an unreadable file is set aside, not overwritten");
+        }
+        finally
+        {
+            try { Directory.Delete(folder, true); } catch (IOException) { }
+        }
 
         Console.WriteLine(failures == 0 ? "\nAll checks passed" : $"\n{failures} check(s) FAILED");
     }

@@ -162,6 +162,9 @@ public sealed unsafe class LlamaEngine : IDisposable
             Complete(text + extra, 2, false, () => true, _ => false);
         }
         Complete("Hello", 2, true, () => true, _ => false);
+        // Autocorrect scores candidates with logits at every position (8 s
+        // cold on an RTX 3060).
+        Score(text, [" It", " It was", " It was a", " It was a sunny day"]);
         Native.llama_memory_clear(Native.llama_get_memory(ctx), true);
         cached.Clear();
     }
