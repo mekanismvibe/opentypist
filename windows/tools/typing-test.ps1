@@ -168,7 +168,7 @@ function Save-Screenshot($name) {
 }
 
 function Show-Log($since) {
-    Get-Content $log | Where-Object { $_ -gt $since -and $_ -match 'showing|no good|caret|field|turned off|password|selected|not enough|administrator|refused|error' } |
+    Get-Content $log | Where-Object { $_ -gt $since -and $_ -match 'shown after|no good|caret|field|turned off|password|selected|not enough|administrator|refused|error' } |
         Select-Object -Last 4 | ForEach-Object { "    log: $_" }
 }
 

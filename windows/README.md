@@ -6,7 +6,8 @@ grey ghost-text suggestions after the caret in any app, accepted with Tab
 GGUF model through llama.cpp. Nothing you type leaves the computer.
 
 **Status: phase 1** (engine, model download, ghost text, Tab / Shift+Tab, tray
-icon, minimal settings). Autocorrect, snippets, per-app keys, the mid-line
+icon, minimal settings). Suggestions stream: they appear as soon as the first
+word is complete and grow word by word; Tab accepts what's visible. Autocorrect, snippets, per-app keys, the mid-line
 card and wrapping are phase 2; personalization, screen context, battery
 options, stats, the updater and CI/release are phase 3.
 
@@ -27,6 +28,7 @@ Then, from the repository root (with submodules: `git clone --recursive`):
 .\windows\build.ps1 -NoVulkan  # CPU only, no Vulkan SDK needed
 .\windows\build.ps1 -Cuda      # also the CUDA backend (needs the CUDA toolkit)
 .\windows\build.ps1 -SkipNative  # rebuild only the app
+.\windows\build.ps1 -Out build\windows-dev\OpenTypist  # somewhere else (e.g. while the app is running)
 ```
 
 The result is a self-contained x64 folder, `build\windows\OpenTypist\`
@@ -55,6 +57,7 @@ a code-signing certificate: click "More info", then "Run anyway".
 .\OpenTypist.exe --selftest | Out-Host                  # load the model, sample suggestions, per-keystroke latency, logic checks
 .\OpenTypist.exe --selftest --model C:\path\model.gguf --cpu | Out-Host
 .\OpenTypist.exe --selftest-offline | Out-Host          # logic checks only (no model, for CI)
+.\OpenTypist.exe --calibrate [--model x.gguf] | Out-Host  # quality per confidence threshold and per-keystroke latency
 .\OpenTypist.exe --download gemma-4-e2b | Out-Host      # download + SHA-256 check from the catalog
 ```
 
@@ -63,25 +66,46 @@ a code-signing certificate: click "More info", then "Run anyway".
 `$env:OPENTYPIST_LOG = '1'` before starting the app writes the diagnostics
 (never typed text) to `%LOCALAPPDATA%\OpenTypist\log.txt`.
 
-`windows\tools\typing-test.ps1 -Target notepad|edge [-ZoomSteps 3]` types into
-Notepad or an Edge text area like a person (real key presses), accepts with
-Tab and Shift+Tab, and prints what the field contains, the app's diagnostics
-and screenshots. Don't touch the keyboard while it runs.
+`windows\tools\typing-test.ps1 -Target notepad|edge|edge-password [-ZoomSteps 3]`
+types into Notepad or an Edge text area like a person (real key presses),
+accepts with Tab and Shift+Tab, and prints what the field contains, the app's
+diagnostics and screenshots (`edge-password` checks that a password field gets
+no suggestion). Don't touch the keyboard while it runs.
 
 ## Measured (phase 1, this PC)
 
 Intel i7-11700F, 32 GB RAM, NVIDIA RTX 3060 12 GB, Windows 11, Vulkan backend.
 
-| | Gemma 4 E2B | Gemma 4 E4B | Gemma 4 E2B on CPU |
-| --- | --- | --- | --- |
-| Per keystroke, no filter (`--selftest` typing simulation, medium length): median / p90 | 84 / 90 ms | 102 / 145 ms | 550 / 729 ms |
-| Per keystroke, Balanced filter: median / p90 | 26 / 43 ms | 43 / 73 ms | 162 / 285 ms |
-| Model load (warm file cache) | 2.4 s | 3.2 s | 2.1 s |
+`--selftest` typing simulation (one keystroke at a time, medium length), median / p90:
 
-In the running app, a suggestion appears a median 32 ms (p90 58 ms) with E2B
-and 52 ms (max 96 ms) with E4B after the 60 ms pause that follows each
-keystroke; reading the field through UI Automation takes 4 ms in Notepad and
-7 ms in Edge.
+| | E2B Q4_0, GPU | E2B Q4_K_M, GPU | E4B, GPU | E2B Q4_0, CPU | E2B Q4_K_M, CPU |
+| --- | --- | --- | --- | --- | --- |
+| Whole suggestion, no filter | 77 / 143 ms | 80 / 88 ms | 102 / 145 ms | 502 / 897 ms | 537 / 701 ms |
+| Whole suggestion, Balanced | 17 / 40 ms | 26 / 43 ms | 43 / 73 ms | 107 / 255 ms | 153 / 276 ms |
+| First word on screen (streaming), Balanced | 17 / 25 ms | 19 / 27 ms | 32 / 45 ms | 148 / 193 ms | 157 / 209 ms |
+| Model load (warm file cache) | 2.0 s | 2.0 s | 3.3 s | 1.6 s | 2.2 s |
+
+In the running app (E4B, streaming), the first word appears 42–48 ms after
+the 60 ms pause that follows each keystroke (73 ms for the first suggestion in
+a field) and the whole suggestion at 53–99 ms; reading the field through UI
+Automation takes 4 ms in Notepad and 6–11 ms in Edge.
+
+### Gemma 4 E2B: Q4_0 or Q4_K_M
+
+The brief asks to check the Mac's switch to Q4_0 on Windows GPUs. `--calibrate`
+(283 positions in 7 messages), two runs per format on the RTX 3060 (Vulkan):
+
+| Balanced | Q4_K_M | Q4_0 |
+| --- | --- | --- |
+| Suggestion shown / first word right / suggested words right | 73.9% / 78.9% / 50.1% | 72.4% / 80.0% / 49.3% |
+| Half-typed words finished (0.10): shown / right | 99.6% / 87.3% | 100% / 86.5% |
+| Per keystroke: median / p90 | 31.2–31.4 / 76.5–78.1 ms | 24.6–28.0 / 67.3–72.7 ms |
+| First word: median / p90 | 18.2 / 24.1–24.2 ms | 17.3–17.8 / 22.9–23.8 ms |
+
+Same quality (Q4_K_M reproduces the Mac's 74% / 50% at Balanced). Q4_0 is as
+fast or slightly faster on Vulkan, about 30% faster on the CPU at Balanced, and
+65 MB smaller, so Windows downloads Q4_0 like the Mac. An existing Q4_K_M
+download keeps working.
 
 The first start of a new build on a PC takes 20–35 s longer: the Vulkan
 driver compiles its GPU pipelines once (then caches them), which the app does
