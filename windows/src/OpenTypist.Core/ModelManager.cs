@@ -60,11 +60,13 @@ public sealed class ModelManager
 
     public void Delete(ModelInfo model)
     {
+        // A file the engine still has mapped can't be deleted yet (IOException
+        // or, for a mapped view, UnauthorizedAccessException); leave it.
         foreach (var name in model.FileNames)
         {
             var path = Path.Combine(ModelsDirectory, name);
-            try { File.Delete(path); } catch (IOException) { }
-            try { File.Delete(path + ".partial"); } catch (IOException) { }
+            try { File.Delete(path); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            try { File.Delete(path + ".partial"); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         }
     }
 
@@ -72,7 +74,7 @@ public sealed class ModelManager
     {
         cancel?.Cancel();
         cancel = null;
-        SetState(DownloadState.None);
+        SetState(DownloadState.None, null);
     }
 
     public Task StartDownload(ModelInfo model)
@@ -80,12 +82,13 @@ public sealed class ModelManager
         if (IsDownloading) return Task.CompletedTask;
         var source = new CancellationTokenSource();
         cancel = source;
-        SetState(new DownloadState(Phase.Downloading, model.Id, 0, model.Size));
-        return Task.Run(() => DownloadAsync(model, source.Token));
+        SetState(new DownloadState(Phase.Downloading, model.Id, 0, model.Size), source);
+        return Task.Run(() => DownloadAsync(model, source));
     }
 
-    private async Task DownloadAsync(ModelInfo model, CancellationToken token)
+    private async Task DownloadAsync(ModelInfo model, CancellationTokenSource source)
     {
+        var token = source.Token;
         var partial = DownloadPathFor(model) + ".partial";
         try
         {
@@ -121,15 +124,17 @@ public sealed class ModelManager
                     if (report.ElapsedMilliseconds > 250)
                     {
                         report.Restart();
-                        SetState(new DownloadState(Phase.Downloading, model.Id, received, model.Size));
+                        SetState(new DownloadState(Phase.Downloading, model.Id, received, model.Size), source);
                     }
                 }
             }
 
-            SetState(new DownloadState(Phase.Verifying, model.Id, model.Size, model.Size));
+            SetState(new DownloadState(Phase.Verifying, model.Id, model.Size, model.Size), source);
             Verify(partial, model);
+            // Cancelled while verifying: keep the (complete) partial file, don't install it.
+            token.ThrowIfCancellationRequested();
             File.Move(partial, DownloadPathFor(model), overwrite: true);
-            SetState(DownloadState.None);
+            SetState(DownloadState.None, source);
             Post(() => Installed?.Invoke(model));
         }
         catch (OperationCanceledException)
@@ -138,7 +143,7 @@ public sealed class ModelManager
         }
         catch (Exception e)
         {
-            SetState(new DownloadState(Phase.Failed, model.Id, 0, model.Size, e.Message));
+            SetState(new DownloadState(Phase.Failed, model.Id, 0, model.Size, e.Message), source);
         }
     }
 
@@ -162,10 +167,12 @@ public sealed class ModelManager
         }
     }
 
-    private void SetState(DownloadState state) => Post(() =>
+    /// `from`: the download reporting it. A cancelled download (or one a newer
+    /// download replaced) may still report progress, verifying or a failure;
+    /// that must not overwrite what the user did since.
+    private void SetState(DownloadState state, CancellationTokenSource? from) => Post(() =>
     {
-        // A cancelled download may still report progress once; ignore it.
-        if (cancel is null && state.Phase == Phase.Downloading) return;
+        if (from is not null && !ReferenceEquals(cancel, from)) return;
         Download = state;
         DownloadChanged?.Invoke();
     });

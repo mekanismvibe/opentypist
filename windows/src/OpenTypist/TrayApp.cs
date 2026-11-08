@@ -50,6 +50,8 @@ public sealed class TrayApp : IDisposable
     private long lastTypingTicks = DateTime.UtcNow.Ticks;
     private DispatcherTimer? idleTimer;
     private bool shutDown;
+    /// While a model file is being released for deletion: nothing loads.
+    private bool releasingModel;
 
     public AppSettings Settings => settings;
     public EngineService Engine => engine;
@@ -192,6 +194,7 @@ public sealed class TrayApp : IDisposable
     /// configured, or none while paused or sleeping.
     public void LoadModel(bool force = false)
     {
+        if (releasingModel) return;
         var behavior = power.Behavior;
         bool wasPaused = powerPaused;
         powerPaused = behavior == PowerBehavior.Pause;
@@ -220,6 +223,30 @@ public sealed class TrayApp : IDisposable
         loadedModelPath = path;
         loadedOnGpu = settings.UseGpu;
         engine.Load(path, settings.UseGpu);
+    }
+
+    /// Whether the engine has (or is loading) one of this model's files.
+    public bool HasLoaded(ModelInfo model) =>
+        loadedModelPath is not null && model.FileNames.Contains(Path.GetFileName(loadedModelPath), StringComparer.OrdinalIgnoreCase);
+
+    /// Unloads the model and returns once the engine has let go of its file,
+    /// so it can be deleted. `Unload` is only queued (behind a generation or
+    /// a load's warm-up); `Shutdown` queues behind it and waits up to 10 s,
+    /// so a few rounds cover a slow warm-up. UI thread.
+    public async Task ReleaseModelFileAsync()
+    {
+        releasingModel = true;
+        try
+        {
+            controller?.Dismiss();
+            engine.Unload();
+            loadedModelPath = null;
+            for (int i = 0; i < 3; i++) await Task.Run(() => engine.Shutdown());
+        }
+        finally
+        {
+            releasingModel = false;
+        }
     }
 
     /// Hook thread: a key went down.
@@ -302,10 +329,26 @@ public sealed class TrayApp : IDisposable
         autocorrector?.Reset();
         samples?.Flush();
         if (hwnd == IntPtr.Zero) return;
-        GetWindowThreadProcessId(hwnd, out int pid);
+        int pid = AppProcessId(hwnd);
         if (pid == Environment.ProcessId || ClassName(hwnd) == "Shell_TrayWnd") return;
         var path = ProcessImagePath(pid);
         if (path is null) return;
+        lastExternalApp = (Path.GetFileName(path).ToLowerInvariant(), FocusReader.DisplayName(path));
+        lastExternalWindow = hwnd;
+        autocorrector?.SetCurrentApp(lastExternalApp.Value.Id, lastExternalApp.Value.Name);
+    }
+
+    private IntPtr lastExternalWindow;
+
+    /// A UWP app's frame becomes foreground before the app attaches its
+    /// window to it (on launch and when restored), so `AppProcessId` can
+    /// still name ApplicationFrameHost then. Look again before offering
+    /// "Disable in …", which would otherwise turn off every UWP app.
+    private void RefreshExternalApp()
+    {
+        if (lastExternalApp?.Id != "applicationframehost.exe" || lastExternalWindow == IntPtr.Zero) return;
+        var path = ProcessImagePath(AppProcessId(lastExternalWindow));
+        if (path is null || Path.GetFileName(path).Equals("applicationframehost.exe", StringComparison.OrdinalIgnoreCase)) return;
         lastExternalApp = (Path.GetFileName(path).ToLowerInvariant(), FocusReader.DisplayName(path));
         autocorrector?.SetCurrentApp(lastExternalApp.Value.Id, lastExternalApp.Value.Name);
     }
@@ -362,6 +405,7 @@ public sealed class TrayApp : IDisposable
 
     private void BuildMenu(Forms.ContextMenuStrip menu)
     {
+        RefreshExternalApp();
         menu.Items.Clear();
         menu.Items.Add(new Forms.ToolStripMenuItem(StatusText()) { Enabled = false });
         menu.Items.Add(new Forms.ToolStripMenuItem($"Last check: {AppStatus.LastCheck}") { Enabled = false });

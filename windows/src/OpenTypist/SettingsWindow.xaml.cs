@@ -32,7 +32,17 @@ public partial class SettingsWindow : Window
         MidLineBox.Click += (_, _) => Update(() => settings.MidLineSuggestions = MidLineBox.IsChecked == true);
         AppContextBox.Click += (_, _) => Update(() => settings.UseAppContext = AppContextBox.IsChecked == true);
         GpuBox.Click += (_, _) => Update(() => settings.UseGpu = GpuBox.IsChecked == true);
-        LoginBox.Click += (_, _) => AppSettings.LaunchAtLogin = LoginBox.IsChecked == true;
+        LoginBox.Click += (_, _) =>
+        {
+            // The Run key can be locked down (policy, security software); an
+            // exception here would end the app.
+            try { AppSettings.LaunchAtLogin = LoginBox.IsChecked == true; }
+            catch (Exception e) when (e is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            {
+                MessageBox.Show(this, $"Windows didn't allow changing this: {e.Message}", "OpenTypist");
+            }
+            LoginBox.IsChecked = AppSettings.LaunchAtLogin;
+        };
         LengthBox.SelectionChanged += (_, _) => Update(() => settings.Length = (CompletionLength)((ComboBoxItem)LengthBox.SelectedItem).Tag);
         ConfidenceBox.SelectionChanged += (_, _) =>
         {
@@ -178,14 +188,7 @@ public partial class SettingsWindow : Window
                         BuildModelList();
                     }));
                 }
-                buttons.Children.Add(MakeButton("Delete", () =>
-                {
-                    if (MessageBox.Show(this, $"Delete {model.Name} ({model.SizeText}) from this PC?", "OpenTypist", MessageBoxButton.OKCancel) != MessageBoxResult.OK) return;
-                    if (active) app.Engine.Unload();
-                    app.Models.Delete(model);
-                    app.LoadModel(force: true);
-                    BuildModelList();
-                }));
+                buttons.Children.Add(MakeButton("Delete", () => DeleteModel(model)));
             }
             panel.Children.Add(buttons);
             ModelList.Children.Add(new Border
@@ -210,6 +213,23 @@ public partial class SettingsWindow : Window
             }, new Thickness(8, 0, 0, 0)));
             ModelList.Children.Insert(0, new Border { Child = custom, Margin = new Thickness(0, 0, 0, 8) });
         }
+    }
+
+    private async void DeleteModel(ModelInfo model)
+    {
+        if (MessageBox.Show(this, $"Delete {model.Name} ({model.SizeText}) from this PC?", "OpenTypist", MessageBoxButton.OKCancel) != MessageBoxResult.OK) return;
+        // The engine keeps the file mapped until its (queued) unload has run;
+        // deleting before that fails and leaves the file to be loaded again.
+        // Also the smaller model on battery, which isn't the selected one.
+        if (app.HasLoaded(model))
+        {
+            ModelList.IsEnabled = false;
+            try { await app.ReleaseModelFileAsync(); }
+            finally { ModelList.IsEnabled = true; }
+        }
+        app.Models.Delete(model);
+        app.LoadModel(force: true);
+        BuildModelList();
     }
 
     private static Button MakeButton(string title, Action action, Thickness? margin = null)

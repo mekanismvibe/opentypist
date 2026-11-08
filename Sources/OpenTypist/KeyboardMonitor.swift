@@ -106,9 +106,11 @@ enum TextInserter {
 
     /// Line breaks are sent as Shift-Return, which adds a new line in chat
     /// apps (where a plain Return would send the message) as well as in
-    /// ordinary text fields.
+    /// ordinary text fields. A lone "\r" (text pasted from old Mac files or
+    /// Excel) is a line break too, not a plain Return that would send.
     static func type(_ text: String) {
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
         for (index, line) in lines.enumerated() {
             if index > 0 { pressShiftReturn() }
             typeLine(line)

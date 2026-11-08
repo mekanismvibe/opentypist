@@ -105,7 +105,11 @@ public sealed class Updater
                 Set(Phase.UpToDate, $"OpenTypist {CurrentVersion} is up to date");
             }
         }
-        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or IOException)
+        // KeyNotFoundException / InvalidOperationException: JSON without the
+        // expected fields (e.g. a proxy's error page); this is async void, so
+        // anything not caught here would take the app down.
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or IOException
+                                      or KeyNotFoundException or InvalidOperationException)
         {
             Set(Phase.Failed, $"Couldn't check for updates: {e.Message}");
             if (!userInitiated) AppStatus.Log(Message);

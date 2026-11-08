@@ -34,7 +34,9 @@ public static class AppStatus
                 Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
                 File.AppendAllText(LogPath, $"{DateTime.Now:HH:mm:ss.fff} {message}\n");
             }
-            catch (IOException) { }
+            // Called from the keyboard hook and timers too, where an exception
+            // would end the app (a read-only log file: access denied).
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         }
     }
 }

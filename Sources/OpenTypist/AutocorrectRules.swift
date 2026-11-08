@@ -129,13 +129,14 @@ final class AutocorrectRules {
             let upper = options.uppercased()
             let noBackspace = upper.contains("B0") || (defaultNoBackspace && !upper.contains("B"))
             if noBackspace && !replacement.isEmpty { continue }
-            let caseSensitive = options.contains("C") && !upper.contains("C0") && !upper.contains("C1")
+            // Option letters are case-insensitive (`:c:` is `:C:`); `*0`, `?0`, `C0` turn an option off.
+            let caseSensitive = upper.contains("C") && !upper.contains("C0") && !upper.contains("C1")
             add(AutocorrectRule(
                 trigger: caseSensitive ? trigger : trigger.lowercased(),
                 replacement: replacement,
                 caseSensitive: caseSensitive,
-                immediate: options.contains("*"),
-                insideWords: options.contains("?")
+                immediate: options.contains("*") && !options.contains("*0"),
+                insideWords: options.contains("?") && !options.contains("?0")
             ))
             added += 1
         }

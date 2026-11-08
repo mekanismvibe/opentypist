@@ -126,6 +126,9 @@ enum SelfTest {
         precondition(PromptBuilder.confidentText(tokens + [token(" soon", 0.05)], hitTokenLimit: false, minProbability: 0.08).text == " I'll be there")
         precondition(PromptBuilder.confidentText([token("ing", 0.9), token(" late", 0.1)], hitTokenLimit: false, minProbability: 0.25).text == "ing")
         precondition(PromptBuilder.confidentText([token(" maybe", 0.1)], hitTokenLimit: false, minProbability: 0.25).text.isEmpty)
+        // A byte-level token can stop mid-character; the half character isn't shown.
+        let cutOff = LlamaEngine.GeneratedToken(bytes: Array(Array("你好".utf8).dropLast()), probability: 0.9)
+        precondition(PromptBuilder.confidentText([cutOff], hitTokenLimit: true, minProbability: 0.25).text == "你")
 
         // Finishing a half-typed word uses its own, looser bar.
         var finishing = [token("terested", 0.3), token(" in", 0.2), token(" the", 0.9)]
@@ -139,6 +142,9 @@ enum SelfTest {
         precondition(PromptBuilder.streamingText(" I'll be th", prompt: spaced, maxWords: 7, textAfter: "") == "I'll be")
         precondition(PromptBuilder.streamingText(" I'll", prompt: spaced, maxWords: 7, textAfter: "") == nil)
         precondition(PromptBuilder.streamingText(" I'll be there.", prompt: spaced, maxWords: 7, textAfter: "") == "I'll be there.")
+        // A word still growing past a hyphen or apostrophe isn't shown yet.
+        precondition(PromptBuilder.streamingText(" a well-", prompt: spaced, maxWords: 7, textAfter: "") == "a")
+        precondition(PromptBuilder.streamingText(" I said I don'", prompt: spaced, maxWords: 7, textAfter: "") == "I said I")
         let midWord = PromptBuilder.build(textBefore: "very in", appName: nil, windowTitle: nil)
         precondition(PromptBuilder.streamingText("terested in th", prompt: midWord, maxWords: 7, textAfter: "") == "terested in")
         precondition(PromptBuilder.streamingText("terested in this", prompt: midWord, maxWords: 7, textAfter: " this job") == nil
@@ -172,6 +178,8 @@ enum SelfTest {
         precondition(PromptBuilder.junkReason(" for the <b> tag", textBefore: "use <b>") == nil)
         precondition(PromptBuilder.junkReason(" so much for helping me move", textBefore: "thanks") == nil)
         precondition(PromptBuilder.junkReason(" had had enough", textBefore: "she") == nil)
+        precondition(PromptBuilder.junkReason(" was an airport hotel", textBefore: "it") == nil)
+        precondition(PromptBuilder.junkReason(" As an AI, I can't", textBefore: "ok") == "talks about being an AI")
 
         // Sign-in fields and Mail's address fields are left alone.
         func signIn(_ labels: [String], _ identifiers: [String] = [], value: String = "", role: String = "AXTextField") -> Bool {
@@ -183,6 +191,10 @@ enum SelfTest {
         precondition(!signIn(["Email subject"]) && !signIn(["Search mail"], ["emailSearch"]) && !signIn(["Promo code"]))
         precondition(!signIn(["Shipping address"], ["spinner-box"], value: "medium.com/@alice"))
         precondition(!signIn(["Email"], role: "AXTextArea"))
+        // Verification codes: browsers don't expose autocomplete="one-time-code".
+        precondition(signIn(["6-digit code"]) && signIn(["Enter the 4 digit code"]) && signIn(["Enter code"]) && signIn(["SMS code"]) && signIn(["One-time password"]))
+        precondition(signIn([], value: "123456") && signIn([], value: "+1 555 0100") && !signIn([], value: "12 apples"))
+        precondition(!signIn(["Zip code"]) && !signIn(["Discount code"]) && !signIn(["Postal code"]))
         precondition(FieldPolicy.isMailHeaderField(bundleID: "com.apple.mail", role: "AXTextField"))
         precondition(!FieldPolicy.isMailHeaderField(bundleID: "com.apple.mail", role: "AXTextArea"))
         precondition(!FieldPolicy.isMailHeaderField(bundleID: "com.apple.TextEdit", role: "AXTextField"))
@@ -220,6 +232,11 @@ enum SelfTest {
         precondition(replacements.matchAtEnd(of: "email: @@") == .fix(replacement: "me@example.com", length: 2))
         precondition(replacements.matchAtEnd(of: "send to ;addr") == .fix(replacement: "1 Main St\nSpringfield", length: 5))
         precondition(replacements.matchAtEnd(of: "x;addr") == nil)
+        // AutoHotkey option letters are case-insensitive; `*0` turns `*` off.
+        let ahkOptions = AutocorrectRules()
+        ahkOptions.loadAutoHotkey(":c:US::United States\n:*0:brb::be right back")
+        precondition(ahkOptions.matchAtEnd(of: "us") == nil && ahkOptions.matchAtEnd(of: "US") == .fix(replacement: "United States", length: 2))
+        precondition(ahkOptions.matchImmediate("brb") == nil && ahkOptions.matchAtEnd(of: "brb") == .fix(replacement: "be right back", length: 3))
 
         precondition(Updater.isNewer("0.10.0", than: "0.9.2") && Updater.isNewer("0.2.0", than: "0.1.0"))
         precondition(!Updater.isNewer("0.2.0", than: "0.2.0") && !Updater.isNewer("0.1.9", than: "0.2"))
@@ -230,6 +247,10 @@ enum SelfTest {
         precondition(s.remaining(textBefore: "late, so I'll ") == "be there soon")
         precondition(s.remaining(textBefore: "late, so I'll b") == "e there soon")
         precondition(s.remaining(textBefore: "late, so I'd") == nil)
+        // Finishing mid-line: no space before closing punctuation, but an
+        // opening straight quote (after a space) keeps it.
+        precondition(CompletionController.closes(",", before: "see you") && CompletionController.closes("\"", before: "he said hi"))
+        precondition(!CompletionController.closes("\"", before: "please read ") && !CompletionController.closes("(", before: "x"))
         print("\nSuggestion checks passed")
     }
 
@@ -572,6 +593,7 @@ enum SelfTest {
         let cleaned = WritingSamples.clean("My card is 4111 1111 1111 1111 and the token is abcdefghij0123456789abcdefghij0123, thanks so much for helping") ?? ""
         print("  clean: \(cleaned)")
         precondition(!cleaned.contains("4111") && !cleaned.contains("abcdefghij0123"))
+        precondition(cleaned.contains("is … and"), "the space after a card number stays")
 
         // Does the profile change what the model suggests?
         let text = "Hi Sarah,\n\nThanks again for your help with the move today, I really appreciate it.\n\nCheers,\n"
@@ -586,10 +608,9 @@ enum SelfTest {
         }
 
         // Writing samples reach the prompt too, after the profile.
-        let samples = WritingSamples(store: store)
-        let wasEnabled = Settings.shared.keepWritingSamples
-        Settings.shared.keepWritingSamples = true
-        defer { Settings.shared.keepWritingSamples = wasEnabled }
+        // Turned on for this instance only: a failed check must not leave the
+        // user's own setting on.
+        let samples = WritingSamples(store: store, enabled: { true }, appDisabled: { _ in false })
         for message in ["haha yeah that works for me, see you at 7 then!", "omg yes!! bring the dog too, she'll love it",
                         "ok sounds good, i'll grab snacks on the way over"] {
             samples.record(WritingSample(date: Date(), bundleID: "com.apple.MobileSMS", appName: "Messages", windowTitle: "Sam", text: message + " " + message))
@@ -599,6 +620,23 @@ enum SelfTest {
         precondition(examples.count == 3 && header.hasPrefix("About me:\nI'm Alex.\n\nExamples of things I've written in Messages:\n\""))
         precondition(header.hasSuffix("Application: Messages\nWindow: Sam\nText being written:\n"))
         print("  samples: \(samples.samples.count) stored, \(examples.count) used in the prompt")
+        // An app turned off after the text was typed keeps nothing.
+        let offSamples = WritingSamples(store: SecureStore(directory: directory.appendingPathComponent("off"), key: SymmetricKey(size: .bits256)),
+                                        enabled: { true }, appDisabled: { $0 == "com.example.off" })
+        offSamples.record(WritingSample(date: Date(), bundleID: "com.example.off", appName: "Off", windowTitle: nil,
+                                        text: "this was typed before the app was turned off, so it isn't kept"))
+        precondition(offSamples.samples.isEmpty, "no samples from a disabled app")
+        // A chat message is kept when it's sent (the field clears).
+        let fieldElement = AXUIElementCreateApplication(getpid())
+        func field(_ text: String) -> FocusContext {
+            FocusContext(pid: getpid(), bundleID: "com.apple.MobileSMS", appName: "Messages", windowTitle: "Sam", role: "AXTextArea",
+                         textBefore: text, textAfterOnLine: "", hostPrediction: "", caretRect: nil, style: TextStyle(),
+                         element: fieldElement, appElement: fieldElement, elementFrame: nil, lineStartX: nil)
+        }
+        let sent = "are we still on for dinner on friday? i can book the table for eight"
+        samples.observe(field(sent))
+        samples.observe(field(""))
+        precondition(samples.samples.contains { $0.text == sent }, "a sent message must be kept")
         guard let engine else { return }
         for chat in [false, true] {
             let prompt = PromptBuilder.build(textBefore: "hey are you free tonight? i was thinking we could", appName: "Messages", windowTitle: "Sam",

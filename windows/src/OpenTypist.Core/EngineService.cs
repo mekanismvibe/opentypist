@@ -36,6 +36,9 @@ public sealed class EngineService : IDisposable
     private readonly LlamaEngine engine = new();
     private readonly SynchronizationContext? context;
     private int latestId;
+    /// Bumped by every load and unload (UI thread), so a load that finishes
+    /// after a newer load or an unload doesn't report Ready.
+    private int loadGeneration;
 
     /// UI thread only.
     public State CurrentState { get; private set; } = State.Idle;
@@ -65,6 +68,7 @@ public sealed class EngineService : IDisposable
     public void Load(string path, bool useGpu = true)
     {
         CancelAll();
+        int generation = ++loadGeneration;
         SetState(new State(Status.Loading, Path.GetFileName(path)));
         var started = Stopwatch.StartNew();
         queue.Add(() =>
@@ -76,13 +80,17 @@ public sealed class EngineService : IDisposable
                 var name = engine.ModelDescription;
                 Post(() =>
                 {
+                    if (generation != loadGeneration) return;
                     LastLoadSeconds = started.Elapsed.TotalSeconds;
                     SetState(new State(Status.Ready, name));
                 });
             }
             catch (Exception e)
             {
-                Post(() => SetState(new State(Status.Failed, e.Message)));
+                Post(() =>
+                {
+                    if (generation == loadGeneration) SetState(new State(Status.Failed, e.Message));
+                });
             }
         });
     }
@@ -90,6 +98,7 @@ public sealed class EngineService : IDisposable
     public void Unload()
     {
         CancelAll();
+        loadGeneration++;
         queue.Add(engine.Unload);
         SetState(State.Idle);
     }

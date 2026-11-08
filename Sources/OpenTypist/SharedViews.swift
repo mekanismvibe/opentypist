@@ -134,10 +134,13 @@ enum AppActions {
     }
 
     /// macOS only applies a new Screen Recording grant after a restart.
+    /// Opens the app again once this process has exited: `open` while it's
+    /// still quitting would just activate it, and nothing would come back.
     static func relaunch() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
+        task.arguments = ["-c", "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$0\"",
+                          Bundle.main.bundlePath, String(ProcessInfo.processInfo.processIdentifier)]
         try? task.run()
         NSApp.terminate(nil)
     }

@@ -41,7 +41,7 @@ public sealed class Stats
         {
             data = File.Exists(path) ? JsonSerializer.Deserialize<Data>(File.ReadAllText(path)) ?? new() : new();
         }
-        catch (Exception e) when (e is JsonException or IOException)
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
         {
             data = new();
         }

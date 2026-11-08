@@ -34,12 +34,20 @@ final class WritingSamples: ObservableObject {
     private var current: (key: String, sample: WritingSample)?
     private var exampleCache: (key: String, examples: [String])?
 
-    init(store: SecureStore) {
+    private let enabled: () -> Bool
+    private let appDisabled: (String?) -> Bool
+
+    /// `enabled` and `appDisabled` are for tests, which mustn't depend on
+    /// (or flip) the user's settings.
+    init(store: SecureStore, enabled: @escaping () -> Bool = { Settings.shared.keepWritingSamples },
+         appDisabled: @escaping (String?) -> Bool = { Settings.shared.isDisabled(bundleID: $0) }) {
         self.store = store
+        self.enabled = enabled
+        self.appDisabled = appDisabled
         samples = store.load([WritingSample].self, from: Self.fileName) ?? []
     }
 
-    var isEnabled: Bool { Settings.shared.keepWritingSamples }
+    var isEnabled: Bool { enabled() }
 
     // MARK: - Capture
 
@@ -50,9 +58,11 @@ final class WritingSamples: ObservableObject {
         let sample = WritingSample(date: Date(), bundleID: context.bundleID, appName: context.appName,
                                    windowTitle: context.windowTitle, text: context.textBefore)
         if let current, current.key == key {
-            // Field cleared or replaced, e.g. a chat message was sent.
+            // Field cleared or replaced, e.g. a chat message was sent. (Not
+            // when it shrank by deleting back: that's editing.) Empty is
+            // everything's prefix, so it counts as cleared.
             let old = current.sample.text
-            if sample.text.count < old.count / 2, !old.hasPrefix(sample.text) { commit(current.sample) }
+            if sample.text.count < old.count / 2, sample.text.isEmpty || !old.hasPrefix(sample.text) { commit(current.sample) }
         } else if let current {
             commit(current.sample)
         }
@@ -66,7 +76,9 @@ final class WritingSamples: ObservableObject {
     }
 
     private func commit(_ sample: WritingSample) {
-        guard isEnabled, let text = Self.clean(sample.text) else { return }
+        // An app turned off after the sample was taken (from the menu, say)
+        // is off for samples too.
+        guard isEnabled, !appDisabled(sample.bundleID), let text = Self.clean(sample.text) else { return }
         var cleaned = sample
         cleaned.text = text
         // A draft continued later replaces its earlier, shorter sample.
@@ -91,8 +103,9 @@ final class WritingSamples: ObservableObject {
     static func clean(_ text: String) -> String? {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.count >= minLength else { return nil }
-        // Card-like digit runs and long unbroken tokens (keys, URLs) are removed.
-        text = text.replacingOccurrences(of: #"\b(?:\d[ -]?){13,19}\b"#, with: "…", options: .regularExpression)
+        // Card-like digit runs and long unbroken tokens (keys, URLs) are
+        // removed. A card number ends on a digit, so the space after it stays.
+        text = text.replacingOccurrences(of: #"\b\d(?:[ -]?\d){12,18}\b"#, with: "…", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\S{30,}"#, with: "…", options: .regularExpression)
         let letters = text.filter(\.isLetter).count
         guard Double(letters) / Double(max(text.count, 1)) >= 0.5 else { return nil }

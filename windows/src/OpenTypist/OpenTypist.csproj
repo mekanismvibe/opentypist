@@ -57,9 +57,12 @@
   <!-- llama.dll, ggml*.dll and opentypist_native.dll from windows/build.ps1. -->
   <PropertyGroup>
     <NativeDir Condition="'$(NativeDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\build\wn\runtime\</NativeDir>
+    <!-- NativeDir may come without a trailing separator (build.ps1); a
+         global property can't be reassigned, hence a second one. -->
+    <NativeDllDir>$([MSBuild]::EnsureTrailingSlash('$(NativeDir)'))</NativeDllDir>
   </PropertyGroup>
   <ItemGroup>
-    <None Include="$(NativeDir)*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(NativeDllDir)*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
     <None Include="$(AppIconPath)" Condition="'$(AppIconPath)' != '' and Exists('$(AppIconPath)')" Link="AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 

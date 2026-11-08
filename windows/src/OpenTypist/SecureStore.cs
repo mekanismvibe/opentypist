@@ -30,15 +30,15 @@ public sealed class SecureStore(string? directory = null)
         catch (Exception e) when (e is CryptographicException or JsonException)
         {
             AppStatus.Log($"{name} can't be read ({e.GetType().Name}); keeping it as {name}.unreadable");
-            try { File.Move(path, path + ".unreadable", overwrite: true); } catch (IOException) { }
+            try { File.Move(path, path + ".unreadable", overwrite: true); } catch (Exception m) when (m is IOException or UnauthorizedAccessException) { }
             return null;
         }
-        catch (IOException) { return null; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
 
     public void Delete(string name)
     {
-        try { File.Delete(Path.Combine(Directory, name)); } catch (IOException) { }
+        try { File.Delete(Path.Combine(Directory, name)); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
     public void Save<T>(string name, T value)
@@ -51,7 +51,9 @@ public sealed class SecureStore(string? directory = null)
             File.WriteAllBytes(path + ".tmp", cipher);
             File.Move(path + ".tmp", path, overwrite: true);
         }
-        catch (IOException e)
+        // Also called from timers and the keyboard hook thread, where an
+        // exception would end the app (a read-only file: access denied).
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or CryptographicException)
         {
             AppStatus.Log($"couldn't save {name}: {e.Message}");
         }

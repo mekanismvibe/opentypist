@@ -93,10 +93,14 @@ final class SecureStore {
     private func key() -> SymmetricKey {
         if let cachedKey { return cachedKey }
         let key: SymmetricKey
-        if Self.hasTeamIdentity, let stored = Self.keychainKey() {
+        if Self.hasTeamIdentity, let stored = Self.keychainKey(createIfMissing: false) {
             key = stored
         } else if let stored = readFileKey() {
+            // Also a Developer ID build updating an ad-hoc one: a new Keychain
+            // key would leave everything saved so far unreadable.
             key = stored
+        } else if Self.hasTeamIdentity, let created = Self.keychainKey() {
+            key = created
         } else if let migrated = Self.keychainKeyWithoutPrompt() {
             // Data saved by an earlier build used the Keychain; keep it readable.
             writeFileKey(migrated)

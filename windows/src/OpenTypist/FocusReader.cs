@@ -42,8 +42,9 @@ public sealed record FocusContext(
     /// The top-level window, for screen context.
     IntPtr Window = default);
 
-/// `SignInField`: the focused field asks for an email, username or code (see
-/// `FieldPolicy`), so autocorrect and learning stay out of it too.
+/// `SignInField`: the focused field is a password field or asks for an email,
+/// username or code (see `FieldPolicy`), so autocorrect and learning stay out
+/// of it too.
 public sealed record FocusResult(FocusContext? Context, string? Failure, bool SignInField = false);
 
 /// Reads the focused text field with UI Automation (COM IUIAutomation) on a
@@ -67,7 +68,7 @@ public sealed class FocusReader : IDisposable
     private readonly BlockingCollection<Action> queue = new();
     private readonly Thread thread;
     private IUIAutomation? automation;
-    private readonly Dictionary<int, (string Id, string Name, bool? Elevated)> processes = [];
+    private readonly Dictionary<int, (string ImagePath, string Id, string Name, bool? Elevated)> processes = [];
     private static readonly bool SelfElevated = IsElevated(Environment.ProcessId) == true;
 
     public FocusReader()
@@ -98,13 +99,14 @@ public sealed class FocusReader : IDisposable
 
     public void Dispose() => queue.CompleteAdding();
 
-    /// Reads the focused field on the UI Automation thread.
-    public Task<FocusResult> ReadAsync()
+    /// Reads the focused field on the UI Automation thread. Apps for which
+    /// `isDisabled` (given the lowercase executable name) says yes are never read.
+    public Task<FocusResult> ReadAsync(Func<string, bool>? isDisabled = null)
     {
         var done = new TaskCompletionSource<FocusResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         queue.Add(() =>
         {
-            try { done.SetResult(Read()); }
+            try { done.SetResult(Read(isDisabled)); }
             catch (COMException e) { done.SetResult(new FocusResult(null, $"UI Automation error 0x{e.HResult:X8}")); }
             catch (Exception e) { done.SetResult(new FocusResult(null, $"UI Automation error: {e.Message}")); }
         });
@@ -146,7 +148,7 @@ public sealed class FocusReader : IDisposable
         return signIn;
     }
 
-    private FocusResult Read()
+    private FocusResult Read(Func<string, bool>? isDisabled)
     {
         if (automation is null) return Fail("UI Automation isn't available");
         var hwnd = GetForegroundWindow();
@@ -165,8 +167,19 @@ public sealed class FocusReader : IDisposable
         // their own process on the element.
         int pid = element.CurrentProcessId;
         if (pid == Environment.ProcessId) return Fail("OpenTypist's own window");
+        // The foreground window's app as the keyboard hook sees it (the hosted
+        // app for UWP frames, see Win32.AppProcessId), so both agree on which
+        // app is turned off.
+        int windowAppPid = AppProcessId(hwnd);
+        string windowAppId = windowAppPid == windowPid ? app.Id : ProcessInfo(windowAppPid).Id;
         if (pid != 0 && pid != windowPid) app = ProcessInfo(pid);
         else pid = windowPid;
+
+        // Apps turned off are never read, not even to be skipped.
+        if (isDisabled is not null && (isDisabled(app.Id) || isDisabled(windowAppId)))
+        {
+            return Fail($"{app.Name}: turned off for this app");
+        }
 
         if (app.Elevated == true && !SelfElevated)
         {
@@ -176,7 +189,9 @@ public sealed class FocusReader : IDisposable
         int controlType = element.CurrentControlType;
         string role = RoleName(controlType);
         // Never read or complete password fields.
-        if (element.CurrentIsPassword != 0) return Fail($"{app.Name}: password field, skipped");
+        // Flagged like a sign-in field: the keyboard hook sees every key typed
+        // there, and autocorrect or learning must not touch a password.
+        if (element.CurrentIsPassword != 0) return new FocusResult(null, $"{app.Name}: password field, skipped", SignInField: true);
 
         bool singleLine = controlType is UIA_EditControlTypeId or UIA_ComboBoxControlTypeId && !IsMultiLine(element);
         if (FieldPolicy.IsMailHeaderField(app.Id, singleLine))
@@ -233,8 +248,10 @@ public sealed class FocusReader : IDisposable
         var before = beforeRange.GetText(-1) ?? "";
         var after = afterRange.GetText(-1) ?? "";
 
-        before = TextUtil.NormalizeNewlines(before);
-        after = TextUtil.NormalizeNewlines(after);
+        // Word reports a Shift+Enter line break as a vertical tab (and a page
+        // break as a form feed): line breaks like the Mac's isNewline.
+        before = OtherLineBreaks(TextUtil.NormalizeNewlines(before));
+        after = OtherLineBreaks(TextUtil.NormalizeNewlines(after));
         int newline = after.IndexOf('\n');
         if (newline >= 0) after = after[..newline];
         // Some apps report a non-breaking space for the trailing space.
@@ -261,6 +278,11 @@ public sealed class FocusReader : IDisposable
         return new FocusResult(new FocusContext(pid, app.Id, app.Name, windowTitle, role, before, after, caretRect, style, frame,
                                                 singleLine, lineStart, element, fieldId, hwnd), null);
     }
+
+    /// Same length, so caret offsets still hold.
+    private static string OtherLineBreaks(string s) =>
+        s.IndexOfAny(['\v', '\f', '\u0085', '\u2028', '\u2029']) < 0 ? s
+            : s.Replace('\v', '\n').Replace('\f', '\n').Replace('\u0085', '\n').Replace('\u2028', '\n').Replace('\u2029', '\n');
 
     /// Left edge of the caret's visual line: its first character, so wrapped
     /// ghost text lines up with real text. Tries the line as UI Automation
@@ -358,7 +380,7 @@ public sealed class FocusReader : IDisposable
 
     /// Browsers say whether a field is multi-line (Chromium's ARIA
     /// properties: "multiline=false"); otherwise a field much taller than a
-    /// line is multi-line.
+    /// line (at this monitor's scaling) is multi-line.
     private static bool IsMultiLine(IUIAutomationElement element)
     {
         try
@@ -368,8 +390,10 @@ public sealed class FocusReader : IDisposable
                 if (aria.Contains("multiline=true", StringComparison.Ordinal)) return true;
                 if (aria.Contains("multiline=false", StringComparison.Ordinal)) return false;
             }
+            // Physical pixels: 60 at 100% scaling, so a one-line field at
+            // 200-300% (a 32-px WinUI box is 64-96 px) stays one line.
             var rect = element.CurrentBoundingRectangle;
-            return rect.bottom - rect.top > 60;
+            return rect.bottom - rect.top > 60 * ScaleAt(rect.left, rect.top);
         }
         catch (COMException) { return false; }
     }
@@ -489,13 +513,14 @@ public sealed class FocusReader : IDisposable
 
     private (string Id, string Name, bool? Elevated) ProcessInfo(int pid)
     {
-        if (processes.TryGetValue(pid, out var cached)) return cached;
+        // The image path is checked every time: Windows reuses process ids, and
+        // a new process must not inherit an old one's name (or disabled state).
         var path = ProcessImagePath(pid);
-        string id = path is null ? $"pid {pid}" : Path.GetFileName(path).ToLowerInvariant();
-        string name = path is null ? id : DisplayName(path);
-        var info = (id, name, path is null ? (bool?)true : IsElevated(pid));
+        if (path is null) return ($"pid {pid}", $"pid {pid}", true);
+        if (processes.TryGetValue(pid, out var cached) && cached.ImagePath == path) return (cached.Id, cached.Name, cached.Elevated);
+        var info = (ImagePath: path, Id: Path.GetFileName(path).ToLowerInvariant(), Name: DisplayName(path), Elevated: IsElevated(pid));
         if (processes.Count > 200) processes.Clear();
         processes[pid] = info;
-        return info;
+        return (info.Id, info.Name, info.Elevated);
     }
 }
