@@ -21,6 +21,9 @@ final class ModelManager: NSObject, ObservableObject {
     private var session: URLSession?
     private var task: URLSessionDownloadTask?
     private var downloadingModel: ModelInfo?
+    /// Bumped by every start and cancel, so a verification that finishes
+    /// after the download was cancelled doesn't install it.
+    private var downloadGeneration = 0
 
     var modelsDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -134,6 +137,7 @@ final class ModelManager: NSObject, ObservableObject {
         self.session = session
         self.task = task
         downloadingModel = model
+        downloadGeneration += 1
         download = .downloading(modelID: model.id, received: 0, total: model.size)
         task.resume()
     }
@@ -144,15 +148,23 @@ final class ModelManager: NSObject, ObservableObject {
         task = nil
         session = nil
         downloadingModel = nil
+        downloadGeneration += 1
         download = .none
     }
 
     private func verifyAndInstall(_ partial: URL, model: ModelInfo) {
         download = .verifying(modelID: model.id)
         let destination = downloadURL(for: model)
+        let generation = downloadGeneration
         DispatchQueue.global(qos: .utility).async {
             let result = Result { try Self.verify(partial, model: model) }
             DispatchQueue.main.async {
+                guard generation == self.downloadGeneration else {
+                    // Cancelled while verifying: don't install it, and leave
+                    // a newer download (and its state) alone.
+                    if !self.isDownloading(model) { try? FileManager.default.removeItem(at: partial) }
+                    return
+                }
                 self.downloadingModel = nil
                 switch result {
                 case .success:
@@ -185,9 +197,13 @@ final class ModelManager: NSObject, ObservableObject {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try handle.read(upToCount: 8 << 20), !chunk.isEmpty {
+        // Each chunk is autoreleased: without a pool per chunk, the whole
+        // file (up to 18 GB) piles up in memory until hashing ends.
+        while try autoreleasepool(invoking: {
+            guard let chunk = try handle.read(upToCount: 8 << 20), !chunk.isEmpty else { return false }
             hasher.update(data: chunk)
-        }
+            return true
+        }) {}
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         guard digest == model.sha256 else {
             throw VerificationError(errorDescription: "Downloaded file failed the checksum check")
@@ -200,13 +216,15 @@ extension ModelManager: URLSessionDownloadDelegate {
         _ session: URLSession, downloadTask: URLSessionDownloadTask,
         didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64
     ) {
-        guard let model = downloadingModel else { return }
+        guard session === self.session, let model = downloadingModel else { return }
         let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : model.size
         download = .downloading(modelID: model.id, received: totalBytesWritten, total: total)
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let model = downloadingModel else { return }
+        // Callbacks from a cancelled download's session can still arrive after
+        // a new download started; they must not touch the new one.
+        guard session === self.session, let model = downloadingModel else { return }
         // The temporary file is deleted when this method returns, so move it now.
         let partial = modelsDirectory.appendingPathComponent(model.fileName + ".partial")
         try? FileManager.default.removeItem(at: partial)
@@ -225,8 +243,12 @@ extension ModelManager: URLSessionDownloadDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // A cancelled download's late callback would otherwise drop (and
+        // invalidate) the session of a download started since, which then
+        // couldn't be cancelled.
+        guard session === self.session else { return }
         defer {
-            self.session?.finishTasksAndInvalidate()
+            session.finishTasksAndInvalidate()
             self.session = nil
             self.task = nil
         }

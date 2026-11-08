@@ -96,7 +96,7 @@ public sealed class AppSettings
         {
             settings = File.Exists(path) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Json) ?? new() : new();
         }
-        catch (Exception e) when (e is JsonException or IOException)
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
         {
             AppStatus.Log($"settings unreadable, using defaults: {e.Message}");
             settings = new();
@@ -115,7 +115,7 @@ public sealed class AppSettings
             File.WriteAllText(temp, JsonSerializer.Serialize(this, Json));
             File.Move(temp, Path, overwrite: true);
         }
-        catch (IOException e)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             AppStatus.Log($"couldn't save settings: {e.Message}");
         }

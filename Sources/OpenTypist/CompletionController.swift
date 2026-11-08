@@ -12,7 +12,17 @@ final class CompletionController {
     private var suggestion: Suggestion?
     /// The part of `suggestion` currently drawn on screen.
     private var visibleText: String?
+    /// The text after the caret on its line when it was drawn.
+    private var textAfterCaret = ""
     private var refreshWork: DispatchWorkItem?
+    /// When the oldest key not yet followed by a read of the field came in.
+    private var unreadSince: Date?
+    /// A click, another app or a Tab may have moved the focus since the last
+    /// read: the next key checks the field at once.
+    private var focusMayHaveMoved = true
+    /// Typing faster than the refresh debounce still gets the field checked
+    /// this often.
+    private static let maxUnreadTime: TimeInterval = 0.15
     /// After accepting, the target app may not have applied our keystrokes yet
     /// when we read it back; wait until the text ends with `expectedTail`.
     private var pendingAccept: (expectedTail: String, retries: Int)?
@@ -82,7 +92,10 @@ final class CompletionController {
         guard settings.enabled else { return dismiss() }
         guard engine.isReady else {
             status.note("Typing seen, but the model isn't loaded yet")
-            return dismiss()
+            reset()
+            // The field is still read, so autocorrect and learning keep out of
+            // sign-in and password fields while there are no suggestions.
+            return scheduleKeyRefresh(keyCode: event.getIntegerValueField(.keyboardEventKeycode))
         }
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
@@ -102,7 +115,47 @@ final class CompletionController {
         } else {
             hideOverlay()
         }
+        scheduleKeyRefresh(keyCode: keyCode)
+    }
+
+    /// The refresh 60 ms after the last key. The refresh is also what tells
+    /// autocorrect whether the field is a password or sign-in field, and keys
+    /// less than 60 ms apart would keep putting it off: a fast typist could
+    /// type a whole password into a field just clicked into before it is
+    /// read. So the field is also checked (only for that) right away on the
+    /// first key after the focus may have moved, and while keys keep coming
+    /// without a read, at least every `maxUnreadTime`.
+    private func scheduleKeyRefresh(keyCode: Int64) {
+        let now = Date()
+        if focusMayHaveMoved || unreadSince.map({ now.timeIntervalSince($0) >= Self.maxUnreadTime }) == true {
+            unreadSince = now
+            DispatchQueue.main.async { [weak self] in self?.checkField() }
+        } else if unreadSince == nil {
+            unreadSince = now
+        }
+        // Tab and Return can move the focus to another field.
+        focusMayHaveMoved = keyCode == KeyCode.tab || keyCode == 36 || keyCode == 76
         scheduleRefresh(after: 0.06)
+    }
+
+    /// Reads the field only to tell autocorrect whether to keep out of it.
+    private func checkField() {
+        guard settings.enabled else { return }
+        if let front = NSWorkspace.shared.frontmostApplication, settings.isDisabled(bundleID: front.bundleIdentifier) { return }
+        noteField(FocusReader.read())
+    }
+
+    /// Password and sign-in fields: no autocorrect or learning from what is
+    /// typed there. Other failures leave the last answer.
+    private func noteField(_ result: Result<FocusContext, FocusFailure>) {
+        switch result {
+        case .success: onSignInField?(false)
+        case .failure(let failure):
+            switch failure {
+            case .signInField, .secureField: onSignInField?(true)
+            default: break
+            }
+        }
     }
 
     /// Autocorrect replaced text with keystrokes we don't see; re-read the
@@ -123,6 +176,12 @@ final class CompletionController {
     }
 
     func dismiss() {
+        reset()
+        focusMayHaveMoved = true
+    }
+
+    /// Drops the suggestion (without assuming the focus moved).
+    private func reset() {
         refreshWork?.cancel()
         engine.cancelAll()
         suggestion = nil
@@ -139,8 +198,12 @@ final class CompletionController {
         engine.cancelAll()
         let consumedBefore = suggestion.text.count - visible.count
         var inserted = chunk
-        // Finishing the suggestion: optionally add a space so typing can go on.
-        if chunk.count >= visible.count, settings.acceptTrailingSpace, inserted.last?.isWhitespace == false {
+        // Finishing the suggestion: optionally add a space so typing can go
+        // on, unless the text after the caret already starts with one, or
+        // with punctuation that closes the phrase (mid-line, the suggestion
+        // leads into ", thanks": "soon , thanks" would be wrong).
+        if chunk.count >= visible.count, settings.acceptTrailingSpace, inserted.last?.isWhitespace == false,
+           !(textAfterCaret.first.map { $0.isWhitespace || Self.closes($0, before: suggestion.anchorTail) } ?? false) {
             inserted += " "
         }
         hideOverlay()
@@ -151,6 +214,18 @@ final class CompletionController {
         pendingAccept = (String(tail.suffix(40)), 8)
         acceptGap = (Date().addingTimeInterval(1.2), nil)
         scheduleRefresh(after: 0.04)
+    }
+
+    /// No space goes before these when a suggestion is finished mid-line.
+    private static let closingPunctuation: Set<Character> = [",", ".", ";", ":", "!", "?", ")", "]", "}", "…", "\"", "'", "\u{201D}", "\u{2019}"]
+
+    /// Whether `next` (right after the caret) closes the phrase. A straight
+    /// quote after a space opens one (read |"The Guide" keeps its space);
+    /// `before` is the text that was before the caret, ahead of the quote.
+    static func closes(_ next: Character, before: String) -> Bool {
+        guard closingPunctuation.contains(next) else { return false }
+        if next == "\"" || next == "'" { return before.last.map { !$0.isWhitespace } ?? false }
+        return true
     }
 
     // MARK: - Refreshing
@@ -164,21 +239,25 @@ final class CompletionController {
 
     private func skip(_ reason: String) {
         status.note(reason)
-        dismiss()
+        reset()
     }
 
     private func refresh() {
-        guard settings.enabled, engine.isReady, !suppressed else { return dismiss() }
+        unreadSince = nil
+        guard settings.enabled, !suppressed else { return dismiss() }
+        // Apps turned off are never read, not even to be skipped.
+        if let front = NSWorkspace.shared.frontmostApplication, settings.isDisabled(bundleID: front.bundleIdentifier) {
+            return skip("\(front.localizedName ?? front.bundleIdentifier ?? "App"): turned off for this app")
+        }
 
         let ctx: FocusContext
-        switch FocusReader.read() {
-        case .success(let value):
-            ctx = value
-            onSignInField?(false)
-        case .failure(let failure):
-            if case .signInField = failure { onSignInField?(true) }
-            return skip(failure.description)
+        let result = FocusReader.read()
+        noteField(result)
+        switch result {
+        case .success(let value): ctx = value
+        case .failure(let failure): return skip(failure.description)
         }
+        guard engine.isReady else { return skip("Typing seen, but the model isn't loaded yet") }
         if settings.isDisabled(bundleID: ctx.bundleID) { return skip("\(ctx.appName): turned off for this app") }
         WritingSamples.shared.observe(ctx)
         guard let caret = ctx.caretRect else { return skip("\(ctx.appName): the app doesn't report where the caret is") }
@@ -259,6 +338,13 @@ final class CompletionController {
             self.acceptGap = nil
             if text == nil, firstShownMs == nil {
                 self.status.note("\(ctx.appName): the model had no good suggestion (\(ms) ms)")
+            } else if text == nil {
+                // Streaming showed the start of it, but the finished text didn't
+                // pass (cut at an unsure word piece, or not fitting the text after
+                // the caret): don't leave that start up to be accepted.
+                self.suggestion = nil
+                self.hideOverlay()
+                self.status.note("\(ctx.appName): dropped a suggestion that didn't hold up once complete (\(ms) ms)")
             }
         }
     }
@@ -279,6 +365,7 @@ final class CompletionController {
     /// seen and started accepting.
     private func show(_ text: String, context: FocusContext, caret: CGRect, continuing: Bool = false) {
         visibleText = text
+        textAfterCaret = context.textAfterOnLine
         let keys = settings.acceptKeys(for: context.bundleID)
         var shown = text
         var anchor = caret
@@ -292,8 +379,12 @@ final class CompletionController {
         if !bubble, !prediction.isEmpty {
             if text.hasPrefix(prediction) {
                 shown = String(text.dropFirst(prediction.count))
-                // Nothing beyond what macOS already shows: leave it to macOS.
-                guard shown.contains(where: { !$0.isWhitespace }) else { return hideOverlay() }
+                // Nothing beyond what macOS already shows: leave it to macOS,
+                // Tab included (the gap after accepting would swallow it).
+                guard shown.contains(where: { !$0.isWhitespace }) else {
+                    acceptGap = nil
+                    return hideOverlay()
+                }
                 // Ghost text starts at the caret's right edge; macOS's starts at its left.
                 let font = OverlayWindow.font(for: context.style, caret: caret)
                 anchor.origin.x += (prediction as NSString).size(withAttributes: [.font: font]).width - caret.width

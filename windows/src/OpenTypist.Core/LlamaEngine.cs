@@ -97,8 +97,10 @@ public sealed unsafe class LlamaEngine : IDisposable
             fixed (byte* p = buf) n = Native.ot_device_info(i, p, buf.Length);
             if (n < 0) break;
             var parts = Encoding.UTF8.GetString(buf, 0, Math.Min(n, buf.Length - 1)).Split('|');
-            if (parts.Length < 5) continue;
-            devices.Add(new ComputeDevice(parts[0], parts[1], parts[2], long.Parse(parts[3]), long.Parse(parts[4])));
+            // Read from both ends: a driver's description may contain '|'. A
+            // garbled entry is skipped rather than ending the app.
+            if (parts.Length < 5 || !long.TryParse(parts[^2], out long free) || !long.TryParse(parts[^1], out long total)) continue;
+            devices.Add(new ComputeDevice(parts[0], string.Join("|", parts[1..^3]), parts[^3], free, total));
         }
         return devices;
     }

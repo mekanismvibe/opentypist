@@ -24,7 +24,8 @@ command -v cmake >/dev/null || { echo "CMake is required: brew install cmake" >&
 GENERATOR=()
 command -v ninja >/dev/null && GENERATOR=(-G Ninja)
 
-cmake -S "$SRC" -B "$BUILD" "${GENERATOR[@]}" \
+# (bash 3.2, macOS's /bin/bash, calls an empty "${GENERATOR[@]}" unbound under set -u.)
+cmake -S "$SRC" -B "$BUILD" ${GENERATOR[@]+"${GENERATOR[@]}"} \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \

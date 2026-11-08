@@ -131,8 +131,11 @@ if (-not $SkipApp) {
     $running = Get-Process OpenTypist -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($out, [StringComparison]::OrdinalIgnoreCase) }
     if ($running) { throw "OpenTypist is running from $out. Quit it from its tray icon first, or build somewhere else with -Out." }
     if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+    # No backslash at the end of NativeDir: with a space in the path, Windows
+    # PowerShell quotes the argument and \" would escape the closing quote,
+    # swallowing the arguments after it. The project adds the separator.
     Invoke-Checked $dotnet publish (Join-Path $PSScriptRoot 'src\OpenTypist\OpenTypist.csproj') -c Release -r win-x64 --self-contained true `
-        -o $out "-p:NativeDir=$runtime\" "-p:AppIconPath=$icon" "-p:Version=$Version" -nologo
+        -o $out "-p:NativeDir=$runtime" "-p:AppIconPath=$icon" "-p:Version=$Version" -nologo
     Write-Host "Built $out\OpenTypist.exe"
 }
 

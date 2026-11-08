@@ -85,10 +85,13 @@ final class TextReplacements: ObservableObject {
             fresh.add(AutocorrectRule(trigger: shortcut.lowercased(), replacement: expansion, caseSensitive: false,
                                       immediate: false, insideWords: false, exact: true))
         }
+        // Your own snippets win over the macOS list. Shortcuts with
+        // punctuation (";addr") go into a list where the first one added
+        // would win, so leave out macOS entries a snippet overrides.
+        let own = Set(snippets.map { $0.shortcut.lowercased() })
         if Settings.shared.useSystemReplacements {
-            for item in systemReplacements { add(item.shortcut, item.phrase) }
+            for item in systemReplacements where !own.contains(item.shortcut.lowercased()) { add(item.shortcut, item.phrase) }
         }
-        // Your own snippets win over the macOS list.
         for snippet in snippets { add(snippet.shortcut, snippet.expansion) }
         rules = fresh
     }

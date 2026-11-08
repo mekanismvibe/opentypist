@@ -48,7 +48,9 @@ public sealed class InputBatch
 
     public InputBatch Text(string text)
     {
-        if (text.Length > 0) items.Add((Kind.Text, text.Replace("\r\n", "\n"), 0));
+        // A lone '\r' (pasted from old Mac files) is a line break too, not a
+        // plain Enter that would send a chat message.
+        if (text.Length > 0) items.Add((Kind.Text, text.Replace("\r\n", "\n").Replace('\r', '\n'), 0));
         return this;
     }
 
@@ -139,8 +141,10 @@ public sealed class InputBatch
             short scan = unicodeOnly ? (short)-1 : VkKeyScanEx(c, layout);
             int vk = scan & 0xFF;
             bool needsModifiers = (scan & 0x0700) != 0;
-            // Caps Lock flips letters.
-            if (capsLock && char.IsLetter(c)) needsModifiers = !needsModifiers;
+            // Caps Lock flips Shift on letters. A letter that needs Ctrl or Alt
+            // (AltGr: Polish ą, Czech/Hungarian letters) still needs them, so it
+            // goes out as a Unicode event, not as the bare key ("a").
+            if (capsLock && char.IsLetter(c) && (scan & 0x0600) == 0) needsModifiers = !needsModifiers;
             bool dead = scan != -1 && (MapVirtualKeyEx((uint)vk, MAPVK_VK_TO_CHAR, layout) & 0x80000000) != 0;
             if (scan != -1 && !needsModifiers && !dead && !char.IsSurrogate(c))
             {

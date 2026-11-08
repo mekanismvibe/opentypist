@@ -68,7 +68,9 @@ public sealed class WritingSamples
 
     private void Commit(WritingSample sample)
     {
-        if (!IsEnabled || Clean(sample.Text) is not string text) return;
+        // An app turned off after the sample was taken (from the menu, say)
+        // is off for samples too.
+        if (!IsEnabled || settings.IsDisabled(sample.AppId) || Clean(sample.Text) is not string text) return;
         var cleaned = sample with { Text = text };
         // A draft continued later replaces its earlier, shorter sample.
         if (Samples.Count > 0 && Samples[^1] is var last && last.AppId == sample.AppId && last.WindowTitle == sample.WindowTitle

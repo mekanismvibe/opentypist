@@ -128,7 +128,8 @@ public partial class SettingsWindow
             foreach (var file in dialog.FileNames)
             {
                 try { results.Add($"{Path.GetFileName(file)}: {autocorrector.ImportList(file)} entries"); }
-                catch (IOException e) { results.Add($"{Path.GetFileName(file)}: {e.Message}"); }
+                // Access denied (a read-only copy from an earlier import, a locked file) too: unhandled, it would end the app.
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { results.Add($"{Path.GetFileName(file)}: {e.Message}"); }
             }
             ImportMessage.Text = string.Join("\n", results);
             RefreshLists();
@@ -188,7 +189,7 @@ public partial class SettingsWindow
                 SnippetMessage.Text = $"Imported {added} snippet(s)." + (skipped.Count > 0 ? $" Skipped {skipped.Count}: {string.Join("; ", skipped.Take(3))}" : "");
                 SnippetMessage.ClearValue(TextBlock.ForegroundProperty);
             }
-            catch (IOException e)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 SnippetMessage.Text = e.Message;
             }

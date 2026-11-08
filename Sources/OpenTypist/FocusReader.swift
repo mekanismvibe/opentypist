@@ -44,6 +44,7 @@ enum FocusFailure: Error, CustomStringConvertible {
     case composing(app: String)
     case signInField(app: String)
     case mailHeader(app: String)
+    case keyboardElsewhere(app: String, other: String)
 
     var description: String {
         switch self {
@@ -56,6 +57,7 @@ enum FocusFailure: Error, CustomStringConvertible {
         case .composing(let app): return "\(app): waiting for the input method to finish"
         case .signInField(let app): return "\(app): sign-in or verification field, skipped"
         case .mailHeader(let app): return "\(app): address and subject fields are left to Mail"
+        case .keyboardElsewhere(let app, let other): return "\(app): typing goes to \(other), not to this app's field"
         }
     }
 }
@@ -82,13 +84,28 @@ enum FocusReader {
         guard let app = NSWorkspace.shared.frontmostApplication else { return .failure(.noFrontApp) }
         let pid = app.processIdentifier
         let appName = app.localizedName ?? app.bundleIdentifier ?? "App"
+        // Keys go to the app with keyboard focus, which isn't always the
+        // frontmost one: Spotlight, Alfred and Raycast type into a panel while
+        // the app behind keeps the menu bar and its own focused field. That
+        // field would get suggestions (and Tab would type them into the panel)
+        // for text not being typed.
+        var keyboardApp: String?
+        if let focusedApp: AXUIElement = attribute(systemWide, kAXFocusedApplicationAttribute) {
+            var focusedPid: pid_t = 0
+            if AXUIElementGetPid(focusedApp, &focusedPid) == .success, focusedPid > 0, focusedPid != pid {
+                keyboardApp = NSRunningApplication(processIdentifier: focusedPid)?.localizedName ?? "another app"
+            }
+        }
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.15)
         exposeAccessibilityTree(appElement, pid: pid)
 
         // Ask the app itself first; the system-wide query fails for some apps.
-        guard let element: AXUIElement = attribute(appElement, kAXFocusedUIElementAttribute)
-            ?? attribute(systemWide, kAXFocusedUIElementAttribute) else {
+        let ownElement: AXUIElement? = attribute(appElement, kAXFocusedUIElementAttribute)
+        if let keyboardApp, ownElement != nil {
+            return .failure(.keyboardElsewhere(app: appName, other: keyboardApp))
+        }
+        guard let element: AXUIElement = ownElement ?? attribute(systemWide, kAXFocusedUIElementAttribute) else {
             return .failure(.noFocusedElement(app: appName))
         }
         AXUIElementSetMessagingTimeout(element, 0.15)

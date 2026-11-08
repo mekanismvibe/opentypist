@@ -186,7 +186,27 @@ final class Updater: ObservableObject {
             throw UpdateError("The downloaded app isn't the expected OpenTypist version.")
         }
         try Self.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", staged.path])
+        try Self.checkSignedLikeThisApp(staged)
         return staged
+    }
+
+    /// A valid signature alone proves nothing about who signed it: the update
+    /// must also satisfy this app's designated requirement (its bundle ID,
+    /// and for a Developer ID build its team), as macOS does for permissions.
+    private static func checkSignedLikeThisApp(_ app: URL) throws {
+        var code: SecCode?
+        var ownStatic: SecStaticCode?
+        var requirement: SecRequirement?
+        // Unsigned (developer) builds have nothing to compare against.
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &ownStatic) == errSecSuccess, let ownStatic,
+              SecCodeCopyDesignatedRequirement(ownStatic, [], &requirement) == errSecSuccess, let requirement else { return }
+        var staticCode: SecStaticCode?
+        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSCheckNestedCode | kSecCSStrictValidate)
+        guard SecStaticCodeCreateWithPath(app as CFURL, [], &staticCode) == errSecSuccess, let staticCode,
+              SecStaticCodeCheckValidity(staticCode, flags, requirement) == errSecSuccess else {
+            throw UpdateError("The downloaded app isn't signed the way this copy of OpenTypist is, so it wasn't installed.")
+        }
     }
 
     private func replaceRunningApp(with newApp: URL) throws {
@@ -214,7 +234,12 @@ final class Updater: ObservableObject {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        // A pool per chunk, or every chunk stays in memory until hashing ends.
+        while try autoreleasepool(invoking: {
+            guard let chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty else { return false }
+            hasher.update(data: chunk)
+            return true
+        }) {}
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
