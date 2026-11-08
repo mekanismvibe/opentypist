@@ -22,7 +22,9 @@ public sealed class CompletionController
     private readonly Dispatcher dispatcher;
 
     /// What the hook thread may act on: the text on screen and its keys.
-    private sealed record Visible(string Text, AcceptKeys Keys);
+    /// `Source`: the suggestion it is part of (`suggestion` can already be a
+    /// newer one while a show waits for the obstacle probe).
+    private sealed record Visible(string Text, AcceptKeys Keys, Suggestion? Source);
 
     private Suggestion? suggestion;
     /// The part of `suggestion` currently drawn on screen.
@@ -35,6 +37,15 @@ public sealed class CompletionController
     /// Set by Esc; cleared by the next typing key.
     private bool suppressed;
     private FocusContext? lastContext;
+    /// When the oldest key not yet followed by a read of the field came in
+    /// (a Stopwatch timestamp).
+    private long? unreadSince;
+    /// A click, another app or a Tab may have moved the focus since the last
+    /// read: the next key checks the field at once.
+    private bool focusMayHaveMoved = true;
+    /// Typing faster than the refresh debounce still gets the field checked
+    /// this often.
+    private const int MaxUnreadMs = 150;
 
     /// After accepting, the overlay is down until the rest of the suggestion
     /// (or the next one) is up again. An accept key pressed in that gap would
@@ -175,7 +186,11 @@ public sealed class CompletionController
         if (!engine.IsReady)
         {
             AppStatus.Note("Typing seen, but the model isn't loaded yet");
-            Dismiss();
+            DropSuggestion();
+            ClearGap();
+            // The field is still read, so autocorrect and learning keep out of
+            // sign-in and password fields while there are no suggestions.
+            ScheduleKeyRefresh(e.Vk);
             return;
         }
         // An IME is composing: stay out of the way.
@@ -193,12 +208,70 @@ public sealed class CompletionController
         if (current is not null && typed.Length > 0 && current.Text.StartsWith(typed, StringComparison.Ordinal) && current.Text.Length > typed.Length)
         {
             visible = current with { Text = current.Text[typed.Length..] };
+            // A show still waiting for the obstacle probe would put back text
+            // that starts with the character just typed.
+            showSequence++;
         }
         else
         {
             HideOverlay();
         }
+        ScheduleKeyRefresh(e.Vk);
+    }
+
+    /// The refresh 60 ms after the last key. The refresh is also what tells
+    /// autocorrect whether the field is a password or sign-in field (the hook
+    /// sees password keys on Windows), and keys less than 60 ms apart would
+    /// keep putting it off: a fast typist could type a whole password into a
+    /// field just clicked into before it is read. So the field is also checked
+    /// (only for that) right away on the first key after the focus may have
+    /// moved, and while keys keep coming without a read, at least every
+    /// `MaxUnreadMs`.
+    private void ScheduleKeyRefresh(int vk)
+    {
+        long now = Stopwatch.GetTimestamp();
+        if (focusMayHaveMoved || (unreadSince is long since && Stopwatch.GetElapsedTime(since, now).TotalMilliseconds >= MaxUnreadMs))
+        {
+            unreadSince = now;
+            _ = CheckField();
+        }
+        else if (unreadSince is null)
+        {
+            unreadSince = now;
+        }
+        // Tab and Enter can move the focus to another field.
+        focusMayHaveMoved = vk is VK_TAB or VK_RETURN;
         ScheduleRefresh(60);
+    }
+
+    /// Reads the field only to tell autocorrect whether to keep out of it.
+    /// One at a time: in an app slow to answer UI Automation, checks every
+    /// 150 ms while typing would queue up faster than they finish, and the
+    /// refresh reads (suggestions) would wait behind all of them.
+    private async Task CheckField()
+    {
+        if (!settings.Enabled || checkingField) return;
+        checkingField = true;
+        try
+        {
+            NoteField(await reader.ReadAsync(settings.IsDisabled));
+        }
+        finally
+        {
+            checkingField = false;
+        }
+    }
+
+    private bool checkingField;
+
+    /// Password and sign-in fields: no autocorrect or learning from what is
+    /// typed there. Other failures (a UI Automation timeout in a busy app,
+    /// a turned-off app) say nothing about the field and leave the last
+    /// answer, as on the Mac: a password field must not get a read error
+    /// count as "not a sign-in field".
+    private void NoteField(FocusResult result)
+    {
+        if (result.Context is not null || result.SignInField) SignInFieldChanged?.Invoke(result.SignInField);
     }
 
     /// A click may move the caret, so drop the suggestion. A new one comes
@@ -211,6 +284,7 @@ public sealed class CompletionController
     {
         DropSuggestion();
         ClearGap();
+        focusMayHaveMoved = true;
     }
 
     private void DropSuggestion()
@@ -228,21 +302,24 @@ public sealed class CompletionController
     private void Accept(string chunk)
     {
         var current = visible;
-        if (chunk.Length == 0 || suggestion is null || current is null)
+        var source = current?.Source ?? suggestion;
+        if (chunk.Length == 0 || source is null || current is null)
         {
-            AppStatus.Log($"accept skipped ({(chunk.Length == 0 ? "nothing to insert" : suggestion is null ? "no suggestion" : "nothing on screen")})");
+            AppStatus.Log($"accept skipped ({(chunk.Length == 0 ? "nothing to insert" : source is null ? "no suggestion" : "nothing on screen")})");
             return;
         }
         // Before the overlay goes down, so the hook thread always sees one or the other.
         lock (gapGate) acceptGap = (DateTime.UtcNow + AcceptGapLength, current.Keys, AcceptKind.None);
         // Accepting what's visible ends a suggestion that's still streaming.
         engine.CancelAll();
-        int consumedBefore = suggestion.Text.Length - current.Text.Length;
+        int consumedBefore = source.Text.Length - current.Text.Length;
         var inserted = chunk;
         // Finishing the suggestion: optionally add a space so typing can go
-        // on, unless the text after the caret already starts with one.
+        // on, unless the text after the caret already starts with one, or
+        // with punctuation that closes the phrase (mid-line, the suggestion
+        // leads into ", thanks": "soon , thanks" would be wrong).
         if (chunk.Length >= current.Text.Length && settings.AcceptTrailingSpace && !char.IsWhiteSpace(inserted[^1])
-            && !(lastContext?.TextAfterOnLine is { Length: > 0 } after && char.IsWhiteSpace(after[0])))
+            && !(lastContext?.TextAfterOnLine is { Length: > 0 } after && (char.IsWhiteSpace(after[0]) || Closes(after[0], source.AnchorTail))))
         {
             inserted += " ";
         }
@@ -251,11 +328,20 @@ public sealed class CompletionController
         AppStatus.Log($"accepted {(chunk.Length >= current.Text.Length ? "the whole suggestion" : "a word")}, {inserted.Length} chars");
         stats.RecordAccepted(inserted);
         Accepted?.Invoke(inserted);
-        var tail = suggestion.AnchorTail + suggestion.Text[..Math.Max(0, consumedBefore)] + inserted;
+        var tail = source.AnchorTail + source.Text[..Math.Clamp(consumedBefore, 0, source.Text.Length)] + inserted;
         // Text goes out a word at a time (see InputBatch), so allow ~0.8 s.
         pendingAccept = (TextUtil.Suffix(tail, 40), 20);
         ScheduleRefresh(40);
     }
+
+    /// No space goes before these when a suggestion is finished mid-line.
+    private const string ClosingPunctuation = ",.;:!?)]}…\"'\u201D\u2019";
+
+    /// Whether `next` (right after the caret) closes the phrase. A straight
+    /// quote after a space opens one (read |"The Guide" keeps its space);
+    /// `before` is the text that was before the caret, ahead of the quote.
+    private static bool Closes(char next, string before) =>
+        ClosingPunctuation.Contains(next) && !(next is '"' or '\'' && (before.Length == 0 || char.IsWhiteSpace(before[^1])));
 
     // Refreshing
 
@@ -276,19 +362,22 @@ public sealed class CompletionController
 
     private async Task Refresh()
     {
-        if (!settings.Enabled || !engine.IsReady || suppressed) { Dismiss(); return; }
+        unreadSince = null;
+        if (!settings.Enabled || suppressed) { Dismiss(); return; }
         int generation = refreshGeneration;
         var started = Stopwatch.StartNew();
 
-        var result = await reader.ReadAsync();
+        var result = await reader.ReadAsync(settings.IsDisabled);
+        // Still the field being typed in, even when a newer key came meanwhile.
+        NoteField(result);
         // A newer keystroke arrived while reading the field.
         if (generation != refreshGeneration)
         {
             AppStatus.Log($"refresh {generation}: superseded while reading the field ({started.ElapsedMilliseconds} ms)");
             return;
         }
-        SignInFieldChanged?.Invoke(result.SignInField);
         if (result.Context is not FocusContext ctx) { Skip(result.Failure ?? "No focused text field"); return; }
+        if (!engine.IsReady) { Skip("Typing seen, but the model isn't loaded yet"); return; }
         lastContext = ctx;
         if (settings.IsDisabled(ctx.AppId)) { Skip($"{ctx.AppName}: turned off for this app"); return; }
         samples.Observe(ctx);
@@ -388,6 +477,15 @@ public sealed class CompletionController
             {
                 AppStatus.Note($"{ctx.AppName}: the model had no good suggestion ({ms} ms, reading the field {readMs} ms)");
             }
+            else if (text is null)
+            {
+                // Streaming showed the start of it, but the finished text didn't
+                // pass (cut at an unsure word piece, or not fitting the text
+                // after the caret): don't leave that start up to be accepted.
+                suggestion = null;
+                HideOverlay();
+                AppStatus.Note($"{ctx.AppName}: dropped a suggestion that didn't hold up once complete ({ms} ms)");
+            }
         }, text => Present(text));
     }
 
@@ -412,13 +510,14 @@ public sealed class CompletionController
     private async void Show(string text, FocusContext ctx, Rect caret, bool continuing = false)
     {
         int sequence = ++showSequence;
+        var source = suggestion;
         var keys = settings.AcceptKeysFor(ctx.AppId);
         // Mid-line, ghost text would sit on top of the text after the caret,
         // so the suggestion goes in a small card just below the line.
         bool bubble = ctx.TextAfterOnLine.Trim(' ', '\t').Length > 0;
         var wrap = bubble ? null : await WrapGuideFor(text, ctx, caret, keys.Word.HintLabel);
         if (sequence != showSequence) return;
-        visible = new Visible(text, keys);
+        visible = new Visible(text, keys, source);
         overlay.ShowSuggestion(text, caret, ctx.Style, keys.Word.HintLabel, wrap, bubble);
         // The gap after accepting is over. An accept key held in it carries on
         // with the suggestion being accepted; a new one has to be seen first.

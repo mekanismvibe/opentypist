@@ -28,6 +28,9 @@ final class EngineService {
     private let engine = LlamaEngine()
     private let lock = NSLock()
     private var latestID = 0
+    /// Bumped by every load and unload (main thread only), so a load that
+    /// finishes after a newer load or an unload doesn't report `.ready`.
+    private var loadGeneration = 0
 
     /// Main thread only.
     private(set) var state: State = .idle
@@ -40,6 +43,8 @@ final class EngineService {
 
     func load(path: String) {
         cancelAll()
+        loadGeneration += 1
+        let generation = loadGeneration
         setState(.loading)
         let started = Date()
         queue.async { [engine] in
@@ -47,17 +52,22 @@ final class EngineService {
                 try engine.load(path: path)
                 let name = engine.modelDescription
                 DispatchQueue.main.async {
+                    guard generation == self.loadGeneration else { return }
                     AppStatus.shared.lastModelLoadSeconds = Date().timeIntervalSince(started)
                     self.setState(.ready(name))
                 }
             } catch {
-                DispatchQueue.main.async { self.setState(.failed(error.localizedDescription)) }
+                DispatchQueue.main.async {
+                    guard generation == self.loadGeneration else { return }
+                    self.setState(.failed(error.localizedDescription))
+                }
             }
         }
     }
 
     func unload() {
         cancelAll()
+        loadGeneration += 1
         queue.async { [engine] in engine.unload() }
         setState(.idle)
     }

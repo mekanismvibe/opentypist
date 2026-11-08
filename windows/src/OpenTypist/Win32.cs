@@ -168,6 +168,12 @@ internal static class Win32
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct GUITHREADINFO
     {
@@ -358,19 +364,39 @@ internal static class Win32
 
     public static bool IsKeyDown(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
 
+    /// The process of the app that shows `hwnd`. UWP apps live in a frame
+    /// window owned by ApplicationFrameHost.exe; the app's own process owns a
+    /// child window (its CoreWindow) inside it. Falls back to the frame's
+    /// process while the app hasn't attached its window yet.
+    public static int AppProcessId(IntPtr hwnd)
+    {
+        GetWindowThreadProcessId(hwnd, out int pid);
+        if (pid == 0 || ClassName(hwnd) != "ApplicationFrameWindow") return pid;
+        int hosted = 0;
+        EnumChildWindows(hwnd, (child, _) =>
+        {
+            GetWindowThreadProcessId(child, out int childPid);
+            if (childPid == 0 || childPid == pid) return true;
+            hosted = childPid;
+            return false;
+        }, IntPtr.Zero);
+        return hosted != 0 ? hosted : pid;
+    }
+
     private static IntPtr lastForeground;
     private static string? lastForegroundApp;
 
-    /// Lowercase executable name of the foreground window's app, cached per
-    /// window (cheap enough for the keyboard hook). Hook thread only.
+    /// Lowercase executable name of the foreground window's app (the hosted
+    /// app for UWP windows, see `AppProcessId`), cached per window (cheap
+    /// enough for the keyboard hook). Hook thread only.
     public static string? ForegroundAppId()
     {
         var hwnd = GetForegroundWindow();
         if (hwnd == lastForeground) return lastForegroundApp;
-        lastForeground = hwnd;
-        GetWindowThreadProcessId(hwnd, out int pid);
-        var path = ProcessImagePath(pid);
+        var path = ProcessImagePath(AppProcessId(hwnd));
         lastForegroundApp = path is null ? null : Path.GetFileName(path).ToLowerInvariant();
+        // A UWP frame whose app hasn't attached its window yet: look again next time.
+        lastForeground = lastForegroundApp == "applicationframehost.exe" ? IntPtr.Zero : hwnd;
         return lastForegroundApp;
     }
 }

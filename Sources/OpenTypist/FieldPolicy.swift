@@ -14,7 +14,7 @@ enum FieldPolicy {
         guard singleLineRoles.contains(role) else { return false }
         return labels.contains(where: labelAsksForCredential)
             || identifiers.contains(where: identifierNamesCredential)
-            || looksLikeEmailBeingTyped(value)
+            || looksLikeEmailBeingTyped(value) || looksLikeNumberBeingTyped(value)
     }
 
     /// Phrases that, in a field's label or placeholder, ask for a credential.
@@ -22,7 +22,11 @@ enum FieldPolicy {
         "email", "e-mail", "email address", "username", "user name", "user id", "login", "log in", "sign in",
         "phone", "phone number", "mobile number", "password", "passcode", "pin", "otp", "2fa", "two-factor",
         "verification code", "security code", "confirmation code", "authentication code", "one-time code",
-        "one time code", "card number", "cvc", "cvv", "expiry", "expiration date"
+        "one time code", "card number", "cvc", "cvv", "expiry", "expiration date",
+        // Browsers don't tell Accessibility about autocomplete="one-time-code"
+        // either, so its usual labels count (as on Windows).
+        "enter code", "enter the code", "sms code", "text code", "login code", "sign-in code", "access code",
+        "one-time password", "one time password"
     ]
 
     /// Words that make a label about writing, not identity: "Email subject",
@@ -36,7 +40,9 @@ enum FieldPolicy {
         let words = label.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "-" }.map(String.init)
         guard !words.isEmpty, !words.contains(where: proseWords.contains) else { return false }
         let padded = " " + words.joined(separator: " ") + " "
-        return credentialPhrases.contains { padded.contains(" \($0) ") }
+        if credentialPhrases.contains(where: { padded.contains(" \($0) ") }) { return true }
+        // "6-digit code", "Enter the 4 digit code".
+        return padded.range(of: #" \d+(-| )digits? (code|pin|number) "#, options: .regularExpression) != nil
     }
 
     /// Parts of a DOM or accessibility id that name a credential: "user_email",
@@ -86,6 +92,14 @@ enum FieldPolicy {
     static func looksLikeEmailBeingTyped(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.range(of: #"^[^\s@/:]+@[^\s@/:]*$"#, options: .regularExpression) != nil
+    }
+
+    /// The whole value is a number being typed: a code, phone or card number
+    /// ("123456", "+1 555 0100", "4111 1111"). No suggestion helps there,
+    /// and Tab must move on to the next field.
+    static func looksLikeNumberBeingTyped(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.range(of: #"^\+?[0-9][0-9 -]{2,}$"#, options: .regularExpression) != nil
     }
 
     // MARK: Mail

@@ -95,7 +95,7 @@ public sealed class KeyboardHook : IDisposable
                 int message = (int)wParam;
                 int vk = (int)info.vkCode;
                 uint late = unchecked((uint)Environment.TickCount - info.time);
-                if (late > 100 && late < 60_000) AppStatus.Log($"keyboard hook: key {vk:X2} arrived {late} ms late");
+                if (late > 100 && late < 60_000) AppStatus.Log($"keyboard hook: a key arrived {late} ms late");
                 if (vk < 256 && Array.IndexOf(TrackedModifiers, vk) >= 0)
                 {
                     Volatile.Write(ref Held[vk], message is WM_KEYDOWN or WM_SYSKEYDOWN);
@@ -111,7 +111,7 @@ public sealed class KeyboardHook : IDisposable
                             bool used = OnKeyDown?.Invoke(e) == true;
                             // Windows passes keys on (and can drop the hook) when this is slow.
                             var took = Stopwatch.GetElapsedTime(started);
-                            if (took.TotalMilliseconds > 25) AppStatus.Log($"keyboard hook: {took.TotalMilliseconds:0} ms for key {vk:X2}");
+                            if (took.TotalMilliseconds > 25) AppStatus.Log($"keyboard hook: {took.TotalMilliseconds:0} ms for a key");
                             if (used)
                             {
                                 swallowed.Add(vk);
@@ -121,7 +121,7 @@ public sealed class KeyboardHook : IDisposable
                             // goes after it, not into the middle of it.
                             if (InputQueue.IsBusy)
                             {
-                                AppStatus.Log($"keyboard hook: key {vk:X2} held back until our keys are out");
+                                AppStatus.Log("keyboard hook: a key was held back until our keys are out");
                                 swallowed.Add(vk);
                                 var replay = new InputBatch();
                                 if (e.Text.Length == 1 && !e.IsShortcut) replay.Replay(e.Text[0]);

@@ -159,9 +159,11 @@ public sealed class AutocorrectRules
             var upper = options.ToUpperInvariant();
             bool noBackspace = upper.Contains("B0") || (defaultNoBackspace && !upper.Contains('B'));
             if (noBackspace && replacement.Length > 0) continue;
-            bool caseSensitive = options.Contains('C') && !upper.Contains("C0") && !upper.Contains("C1");
+            // Option letters are case-insensitive (`:c:` is `:C:`); `*0`, `?0`, `C0` turn an option off.
+            bool caseSensitive = upper.Contains('C') && !upper.Contains("C0") && !upper.Contains("C1");
             Add(new AutocorrectRule(caseSensitive ? trigger : trigger.ToLowerInvariant(), replacement, caseSensitive,
-                                    Immediate: options.Contains('*'), InsideWords: options.Contains('?')));
+                                    Immediate: options.Contains('*') && !options.Contains("*0"),
+                                    InsideWords: options.Contains('?') && !options.Contains("?0")));
             added++;
         }
         return added;

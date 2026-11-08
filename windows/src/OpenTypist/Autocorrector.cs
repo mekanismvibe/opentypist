@@ -65,6 +65,8 @@ public sealed class Autocorrector
         public string Ending { get; } = ending;
         /// Typed after the ending while the check runs.
         public string TypedSince { get; set; } = "";
+        /// The process whose field the check read, so the fix goes nowhere else.
+        public int ProcessId { get; set; }
     }
     private PendingCheck? pending;
     private int nextCheckId;
@@ -142,7 +144,11 @@ public sealed class Autocorrector
     {
         Directory.CreateDirectory(UserListsDirectory);
         var destination = Path.Combine(UserListsDirectory, Path.GetFileName(path));
-        File.Copy(path, destination, overwrite: true);
+        // A file picked from the lists folder itself is already in place.
+        if (!string.Equals(Path.GetFullPath(path), Path.GetFullPath(destination), StringComparison.OrdinalIgnoreCase))
+        {
+            File.Copy(path, destination, overwrite: true);
+        }
         ReloadRules();
         return UserListCounts.FirstOrDefault(l => l.Name == Path.GetFileName(path)).Rules;
     }
@@ -278,6 +284,9 @@ public sealed class Autocorrector
         if (replacements.Match(typed) is AutocorrectMatch.Fix expansion)
         {
             ApplyFix(expansion.Length, expansion.Replacement, ending);
+            // The expansion wasn't typed: keep it away from the learner (this
+            // word and later lines) and from list matching.
+            typed = ending.ToString();
             Note("Expanded a snippet");
             return true;
         }
@@ -350,6 +359,11 @@ public sealed class Autocorrector
         var letters = word.Where(char.IsLetter).ToList();
         if (letters.Count > 1 && letters.All(char.IsUpper)) return;
         if (candidates is null && char.IsUpper(word[0]) && !StartsSentence(typed[..^word.Length])) return;
+        // A late fix re-types what follows the word, and line breaks can only
+        // be re-typed as Shift+Enter: in Word or Docs that turns a new
+        // paragraph into a line break. (A plain Enter would send in chat apps,
+        // where Shift+Enter was the new line.)
+        if (ending == '\n') return;
 
         var check = new PendingCheck(++nextCheckId, word, ending.ToString());
         pending = check;
@@ -380,12 +394,15 @@ public sealed class Autocorrector
         if (!IsPending(check)) return;
         var options = candidates ?? SpellCheck.Guesses(check.Word);
         options.RemoveAll(o => o == check.Word);
-        var result = await reader.ReadAsync();
-        if (options.Count == 0 || result.Context is not FocusContext ctx)
+        // Focus may have moved since the key: apps turned off are never read
+        // (password and sign-in fields fail the read).
+        var result = await reader.ReadAsync(settings.IsDisabled);
+        if (options.Count == 0 || result.Context is not FocusContext ctx || !MayCorrect())
         {
             ClearPending(check);
             return;
         }
+        check.ProcessId = ctx.ProcessId;
         string tail;
         lock (gate) tail = check.Word + check.Ending + check.TypedSince;
         if (!ctx.TextBefore.EndsWith(tail, StringComparison.Ordinal))
@@ -436,18 +453,35 @@ public sealed class Autocorrector
         lock (gate)
         {
             if (!ReferenceEquals(pending, check)) return;
-            pending = null;
             tail = check.Ending + check.TypedSince;
+            // Enter was pressed since (see StartModelCheck).
+            if (tail.Contains('\n'))
+            {
+                pending = null;
+                Note("Autocorrect: the line ended before the fix; left as typed");
+                return;
+            }
         }
-        // Make sure the field still holds exactly what we expect.
-        var result = await reader.ReadAsync();
-        if (result.Context is not FocusContext ctx || !ctx.TextBefore.EndsWith(check.Word + tail, StringComparison.Ordinal))
+        // Make sure the field still holds exactly what we expect. The check
+        // stays pending meanwhile, so keys typed during the read show up in
+        // TypedSince (or end it) instead of slipping in before the backspaces.
+        var result = await reader.ReadAsync(settings.IsDisabled);
+        if (result.Context is not FocusContext ctx || ctx.ProcessId != check.ProcessId || !MayCorrect()
+            || !ctx.TextBefore.EndsWith(check.Word + tail, StringComparison.Ordinal))
         {
+            ClearPending(check);
             AppStatus.Note("Autocorrect: the field changed before the fix could be applied");
             return;
         }
         lock (gate)
         {
+            if (!ReferenceEquals(pending, check) || check.Ending + check.TypedSince != tail)
+            {
+                if (ReferenceEquals(pending, check)) pending = null;
+                AppStatus.Note("Autocorrect: more was typed before the fix could be applied");
+                return;
+            }
+            pending = null;
             new InputBatch().Backspace(AutocorrectRules.Backspaces(check.Word + tail)).Text(replacement + tail).SendFromHook();
             ReplaceTypedSuffix(check.Word.Length + tail.Length, replacement + tail);
             if (check.TypedSince.Length == 0) lastFix = (check.Word, replacement, check.Ending);
@@ -458,6 +492,9 @@ public sealed class Autocorrector
     }
 
     // Helpers
+
+    /// Still allowed to change the field the late check re-read.
+    private bool MayCorrect() => settings.Enabled && settings.AiTypoFix && !InSignInField;
 
     private void RecordFix(bool byModel)
     {

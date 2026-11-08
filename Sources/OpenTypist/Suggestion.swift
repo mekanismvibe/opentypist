@@ -195,9 +195,9 @@ enum PromptBuilder {
             token.probability < (token.finishesWord ? (wordMinProbability ?? minProbability) : minProbability)
         }
         guard let cut = cutIndex else {
-            return (String(decoding: tokens.flatMap(\.bytes), as: UTF8.self), hitTokenLimit)
+            return (decodeComplete(tokens.flatMap(\.bytes)), hitTokenLimit)
         }
-        var text = String(decoding: tokens[..<cut].flatMap(\.bytes), as: UTF8.self)
+        var text = decodeComplete(tokens[..<cut].flatMap(\.bytes))
         let startsNewWord = tokens[cut].bytes.isEmpty || tokens[cut].startsNewWord
         if !startsNewWord {
             if let space = text.lastIndex(where: { $0.isWhitespace }), text[..<space].contains(where: { !$0.isWhitespace }) {
@@ -207,6 +207,19 @@ enum PromptBuilder {
             }
         }
         return (text, false)
+    }
+
+    /// UTF-8 text without a character cut off at the end: byte-level tokens
+    /// (Qwen's, for CJK and emoji) can stop in the middle of one, which would
+    /// otherwise show up as "\u{FFFD}".
+    static func decodeComplete(_ bytes: [UInt8]) -> String {
+        var end = bytes.count
+        for i in stride(from: bytes.count - 1, through: max(0, bytes.count - 4), by: -1) where bytes[i] & 0xC0 != 0x80 {
+            let length = bytes[i] < 0x80 ? 1 : bytes[i] >= 0xF0 ? 4 : bytes[i] >= 0xE0 ? 3 : 2
+            if bytes.count - i < length { end = i }
+            break
+        }
+        return String(decoding: bytes[..<end], as: UTF8.self)
     }
 
     /// Mid-line, the suggestion must lead into the text after the caret, not
@@ -279,8 +292,8 @@ enum PromptBuilder {
         if !textBefore.contains("<"), trimmed.range(of: #"</?[A-Za-z][A-Za-z0-9]*(\s[^<>]*)?>"#, options: .regularExpression) != nil {
             return "contains HTML"
         }
-        let lower = trimmed.lowercased()
-        if ["as an ai", "as a language model"].contains(where: lower.contains) {
+        // Whole words, so "was an airport" or "has an aim" isn't caught.
+        if trimmed.range(of: #"\bas (an ai|a language model)\b"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return "talks about being an AI"
         }
         return nil
@@ -332,7 +345,11 @@ enum PromptBuilder {
     /// passed the confidence filter.
     static func streamingText(_ text: String, prompt: Prompt, maxWords: Int, textAfter: String) -> String? {
         var words = splitWords(text)
-        if let last = text.last, !last.isWhitespace, !last.isPunctuation, !words.isEmpty { words.removeLast() }
+        // A hyphen, apostrophe or slash at the end is inside a word that is
+        // still growing ("well-" before "known", "don'" before "t").
+        if let last = text.last, !last.isWhitespace, !last.isPunctuation || "-'\u{2019}/".contains(last), !words.isEmpty {
+            words.removeLast()
+        }
         guard !words.isEmpty, var shown = clean(words.joined(), prompt: prompt, maxWords: maxWords, hitTokenLimit: false) else {
             return nil
         }

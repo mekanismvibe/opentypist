@@ -85,6 +85,8 @@ final class Settings: ObservableObject {
         "com.agilebits.onepassword7",
         "com.bitwarden.desktop",
         "com.apple.keychainaccess",
+        "com.apple.Passwords",
+        "org.keepassxc.keepassxc",
     ]
 
     private let defaults = UserDefaults.standard

@@ -180,11 +180,23 @@ public static class PromptBuilder
         return (text, false);
     }
 
+    /// The tokens' text without a character cut off at the end: byte-level
+    /// tokens (Qwen's, for CJK and emoji) can stop in the middle of one, which
+    /// would otherwise show up as U+FFFD.
     private static string Decode(IReadOnlyList<GeneratedToken> tokens, int count)
     {
         var bytes = new List<byte>();
         for (int i = 0; i < count; i++) bytes.AddRange(tokens[i].Bytes);
-        return Encoding.UTF8.GetString(bytes.ToArray());
+        int end = bytes.Count;
+        for (int i = bytes.Count - 1; i >= Math.Max(0, bytes.Count - 4); i--)
+        {
+            byte b = bytes[i];
+            if ((b & 0xC0) == 0x80) continue;
+            int length = b < 0x80 ? 1 : b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : 2;
+            if (bytes.Count - i < length) end = i;
+            break;
+        }
+        return Encoding.UTF8.GetString(bytes.ToArray(), 0, end);
     }
 
     /// Mid-line, the suggestion must lead into the text after the caret, not
@@ -343,7 +355,12 @@ public static class PromptBuilder
     public static string? StreamingText(string text, Prompt prompt, int maxWords, string textAfter)
     {
         var words = SplitWords(text);
-        if (text.Length > 0 && !char.IsWhiteSpace(text[^1]) && !char.IsPunctuation(text[^1]) && words.Count > 0) words.RemoveAt(words.Count - 1);
+        // A hyphen, apostrophe or slash at the end is inside a word that is
+        // still growing ("well-" before "known", "don'" before "t").
+        if (text.Length > 0 && !char.IsWhiteSpace(text[^1]) && (!char.IsPunctuation(text[^1]) || "-'\u2019/".Contains(text[^1])) && words.Count > 0)
+        {
+            words.RemoveAt(words.Count - 1);
+        }
         if (words.Count == 0 || Clean(string.Concat(words), prompt, maxWords, false) is not string shown) return null;
         if (textAfter.Length > 0)
         {

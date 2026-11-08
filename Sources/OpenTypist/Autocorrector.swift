@@ -39,6 +39,8 @@ final class Autocorrector {
         let id: Int
         let word: String
         let ending: String
+        /// The app the word was typed in.
+        let bundleID: String?
         /// Typed after the ending while the check runs.
         var typedSince = ""
     }
@@ -98,8 +100,11 @@ final class Autocorrector {
     func importList(from url: URL) throws -> Int {
         try FileManager.default.createDirectory(at: Self.userListsDirectory, withIntermediateDirectories: true)
         let destination = Self.userListsDirectory.appendingPathComponent(url.lastPathComponent)
-        if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
-        try FileManager.default.copyItem(at: url, to: destination)
+        // Picking a file that is already in the folder must not delete it.
+        if destination.resolvingSymlinksInPath().standardizedFileURL != url.resolvingSymlinksInPath().standardizedFileURL {
+            if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
+            try FileManager.default.copyItem(at: url, to: destination)
+        }
         reloadRules()
         return userListCounts.first { $0.name == url.lastPathComponent }?.rules ?? 0
     }
@@ -204,6 +209,9 @@ final class Autocorrector {
         // Text replacements and snippets come first.
         if case .fix(let replacement, let length)? = TextReplacements.shared.match(typed) {
             applyFix(length: length, replacement: replacement, ending: ending, event: event)
+            // The expansion wasn't typed: keep it away from the learner (this
+            // word and later lines) and from list matching.
+            typed = String(ending)
             status.note("Expanded a text replacement")
             return true
         }
@@ -271,9 +279,14 @@ final class Autocorrector {
         let letters = word.filter(\.isLetter)
         if letters.count > 1, letters.allSatisfy(\.isUppercase) { return }
         if candidates == nil, word.first?.isUppercase == true, !Self.startsSentence(typed.dropLast(word.count)) { return }
+        // A late fix re-types what follows the word, and line breaks can only
+        // be re-typed as Shift-Return: in Pages, Word or Docs that turns a
+        // new paragraph into a line break. (A plain Return would send in chat
+        // apps, where Shift-Return was the new line.)
+        if ending == "\n" { return }
 
         nextCheckID += 1
-        let check = PendingCheck(id: nextCheckID, word: word, ending: String(ending))
+        let check = PendingCheck(id: nextCheckID, word: word, ending: String(ending), bundleID: currentApp.bundleID)
         pending = check
 
         // Run once the app has received the ending key.
@@ -286,7 +299,7 @@ final class Autocorrector {
         guard pending?.id == check.id else { return }
         var options = candidates ?? SpellCheck.guesses(for: check.word)
         options.removeAll { $0 == check.word }
-        guard !options.isEmpty, case .success(let ctx) = FocusReader.read() else { pending = nil; return }
+        guard !options.isEmpty, case .success(let ctx) = FocusReader.read(), mayCorrect(ctx, check) else { pending = nil; return }
 
         let tail = check.word + check.ending + (pending?.typedSince ?? "")
         guard ctx.textBefore.hasSuffix(tail) else {
@@ -328,8 +341,13 @@ final class Autocorrector {
         guard let check = pending, check.id == id else { return }
         pending = nil
         let tail = check.ending + check.typedSince
+        // Return was pressed since (see `startModelCheck`).
+        guard !tail.contains("\n") else {
+            status.note("Autocorrect: the line ended before the fix; left as typed")
+            return
+        }
         // Make sure the field still holds exactly what we expect.
-        guard case .success(let ctx) = FocusReader.read(), ctx.textBefore.hasSuffix(check.word + tail) else {
+        guard case .success(let ctx) = FocusReader.read(), mayCorrect(ctx, check), ctx.textBefore.hasSuffix(check.word + tail) else {
             status.note("Autocorrect: the field changed before the fix could be applied")
             return
         }
@@ -340,6 +358,15 @@ final class Autocorrector {
         // It was a typo, not one of the user's own words.
         personal.forgetObservation(of: check.word)
         recordFix(byModel: true)
+    }
+
+    /// The field re-read for a late check may not be the one the word was
+    /// typed in (focus can move in the meantime): only touch it if it's in
+    /// the same app, that app isn't turned off, and it isn't a sign-in field.
+    /// (`FocusReader.read` already fails for password and sign-in fields.)
+    private func mayCorrect(_ ctx: FocusContext, _ check: PendingCheck) -> Bool {
+        settings.enabled && settings.aiTypoFix && !inSignInField
+            && ctx.bundleID == check.bundleID && !settings.isDisabled(bundleID: ctx.bundleID)
     }
 
     // MARK: - Helpers

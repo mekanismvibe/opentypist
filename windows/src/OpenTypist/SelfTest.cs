@@ -200,6 +200,9 @@ public static class SelfTest
         Check(hotstrings.MatchAtEnd("design") is null, "ahk exception ::design::");
         Check(hotstrings.MatchAtEnd("US") == new AutocorrectMatch.Fix("United States", 2) && hotstrings.MatchAtEnd("us") is null, "ahk C is case-sensitive");
         Check(hotstrings.MatchAtEnd("comment") == new AutocorrectMatch.Fix("with comment", 7), "ahk ; comment stripped");
+        var ahkOptions = new AutocorrectRules();
+        ahkOptions.LoadAutoHotkey(":c:US::United States\n:*0:brb::be right back");
+        Check(ahkOptions.MatchAtEnd("us") is null && ahkOptions.MatchImmediate("brb") is null, "ahk option letters are case-insensitive; *0 is off");
 
         // Snippets insert exactly what was written.
         var snippets = new AutocorrectRules();
